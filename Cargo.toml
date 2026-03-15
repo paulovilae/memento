@@ -1,0 +1,47 @@
+[package]
+name = "memento"
+version = "0.1.0"
+edition = "2021"
+description = "Sovereign Memory Agent (Hippocampus) for ImagineOS"
+authors = ["Paulo Vila <paulo@vilaros.com>"]
+
+[dependencies]
+# Async Runtime & IPC
+tokio = { version = "1", features = ["full", "net"] }
+
+
+
+# Zero-Copy Serialization (IPC over UDS)
+rkyv = { version = "0.7", features = ["validation"] }
+
+# App Registry (reads apps.toml manifests)
+toml = "0.8"
+
+# Vector Database (Episodic Memory)
+qdrant-client = "1.9"
+
+# Semantic Graph / JSON (Relational/Fact Memory)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "postgres", "json"] }
+
+# Error Handling & Utilities
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+dotenvy = "0.15"
+
+# Hardware Auto-Discovery & Mesh Monitoring
+sysinfo = "0.30"
+
+# Folder Watcher (Local Ingestion)
+notify = "6.1.1"
+tokio-stream = "0.1.15"
+
+
+walkdir = "2.5.0"
+pdf-extract = "0.10.0"
+calamine = "0.34.0"
+zip = "8.2.0"
+roxmltree = "0.21.1"
+dirs = "6.0.0"
