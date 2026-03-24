@@ -844,6 +844,90 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                 }
             }
 
+            // ─── Schema Auto-Discovery ──────────────────────────────
+            "describe_app" => {
+                let app_slug = req.payload.get("app")
+                    .and_then(|v| v.as_str()).unwrap_or("");
+                
+                if let Some(app_conn) = apps.get(app_slug) {
+                    // Auto-discover ALL public tables + their columns
+                    let schema_query = r#"
+                        SELECT c.table_name, c.column_name, c.data_type, c.is_nullable
+                        FROM information_schema.columns c
+                        JOIN information_schema.tables t ON c.table_name = t.table_name AND c.table_schema = t.table_schema
+                        WHERE c.table_schema = 'public' AND t.table_type = 'BASE TABLE'
+                        ORDER BY c.table_name, c.ordinal_position
+                    "#;
+                    
+                    match sqlx::query(schema_query)
+                        .fetch_all(&app_conn.pool)
+                        .await
+                    {
+                        Ok(rows) => {
+                            let mut tables: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+                            for row in &rows {
+                                let table: String = row.get("table_name");
+                                let col: String = row.get("column_name");
+                                let dtype: String = row.get("data_type");
+                                let entry = tables.entry(table).or_insert_with(|| serde_json::json!([]));
+                                if let Some(arr) = entry.as_array_mut() {
+                                    arr.push(serde_json::json!({"column": col, "type": dtype}));
+                                }
+                            }
+                            serde_json::json!({
+                                "status": "success",
+                                "app": app_slug,
+                                "table_count": tables.len(),
+                                "schema": tables
+                            })
+                        }
+                        Err(e) => serde_json::json!({ "error": format!("Schema query error: {}", e) }),
+                    }
+                } else {
+                    let available: Vec<&String> = apps.keys().collect();
+                    serde_json::json!({
+                        "error": format!("App '{}' not found", app_slug),
+                        "available_apps": available
+                    })
+                }
+            }
+
+            "describe_all_apps" => {
+                // Superuser (Ava): return schemas for ALL apps
+                let mut all_schemas = serde_json::Map::new();
+                for (slug, app_conn) in apps.iter() {
+                    let schema_query = r#"
+                        SELECT c.table_name, c.column_name, c.data_type
+                        FROM information_schema.columns c
+                        JOIN information_schema.tables t ON c.table_name = t.table_name AND c.table_schema = t.table_schema
+                        WHERE c.table_schema = 'public' AND t.table_type = 'BASE TABLE'
+                        ORDER BY c.table_name, c.ordinal_position
+                    "#;
+                    match sqlx::query(schema_query).fetch_all(&app_conn.pool).await {
+                        Ok(rows) => {
+                            let mut tables: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+                            for row in &rows {
+                                let table: String = row.get("table_name");
+                                let col: String = row.get("column_name");
+                                let dtype: String = row.get("data_type");
+                                let entry = tables.entry(table).or_insert_with(|| serde_json::json!([]));
+                                if let Some(arr) = entry.as_array_mut() {
+                                    arr.push(serde_json::json!({"column": col, "type": dtype}));
+                                }
+                            }
+                            all_schemas.insert(slug.clone(), serde_json::json!(tables));
+                        }
+                        Err(e) => {
+                            all_schemas.insert(slug.clone(), serde_json::json!({"error": format!("{}", e)}));
+                        }
+                    }
+                }
+                serde_json::json!({
+                    "status": "success",
+                    "apps": all_schemas
+                })
+            }
+
             // ─── Knowledge Store Actions ─────────────────────────────
             "store_knowledge" => {
                 let key = req.payload.get("key").and_then(|v| v.as_str()).unwrap_or("");
