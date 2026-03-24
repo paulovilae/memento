@@ -1,0 +1,258 @@
+/// Knowledge Store — persistent, tagged key-value memory for AI agents.
+///
+/// Inspired by ContextKeep's memory model but implemented natively in Rust
+/// with SQLite storage and UDS IPC transport.
+use serde::{Deserialize, Serialize};
+use sqlx::sqlite::SqlitePool;
+use sqlx::Row;
+use tracing::{info, error};
+
+/// Represents a knowledge entry stored in the `knowledge_store` table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeEntry {
+    pub key: String,
+    pub content: String,
+    #[serde(default)]
+    pub tags: String,
+}
+
+/// A compact index entry returned by `list()`.
+#[derive(Debug, Serialize)]
+pub struct KnowledgeIndex {
+    pub key: String,
+    pub title: String,
+    pub tags: String,
+    pub char_count: usize,
+    pub updated_at: String,
+}
+
+/// Creates the `knowledge_store` table if it doesn't exist.
+pub async fn init_knowledge_table(pool: &SqlitePool) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS knowledge_store (
+            key TEXT PRIMARY KEY,
+            content TEXT NOT NULL,
+            tags TEXT DEFAULT '',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    info!("📚 Knowledge store table ready");
+    Ok(())
+}
+
+/// Upserts a knowledge entry. If the key already exists, content and tags
+/// are updated and `updated_at` is refreshed.
+pub async fn store(
+    pool: &SqlitePool,
+    key: &str,
+    content: &str,
+    tags: &str,
+) -> serde_json::Value {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO knowledge_store (key, content, tags, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET
+            content = excluded.content,
+            tags = excluded.tags,
+            updated_at = CURRENT_TIMESTAMP
+        "#,
+    )
+    .bind(key)
+    .bind(content)
+    .bind(tags)
+    .execute(pool)
+    .await;
+
+    match result {
+        Ok(_) => {
+            info!("📚 Stored knowledge: {}", key);
+            serde_json::json!({
+                "status": "success",
+                "key": key,
+                "action": "stored"
+            })
+        }
+        Err(e) => {
+            error!("❌ Failed to store knowledge {}: {}", key, e);
+            serde_json::json!({ "error": format!("DB error: {}", e) })
+        }
+    }
+}
+
+/// Retrieves a single knowledge entry by exact key.
+pub async fn get(pool: &SqlitePool, key: &str) -> serde_json::Value {
+    let result = sqlx::query(
+        "SELECT key, content, tags, created_at, updated_at FROM knowledge_store WHERE key = ?",
+    )
+    .bind(key)
+    .fetch_optional(pool)
+    .await;
+
+    match result {
+        Ok(Some(row)) => {
+            let content: String = row.get("content");
+            let tags: String = row.get("tags");
+            let created_at: String = row.get("created_at");
+            let updated_at: String = row.get("updated_at");
+            serde_json::json!({
+                "status": "success",
+                "key": key,
+                "content": content,
+                "tags": tags,
+                "char_count": content.len(),
+                "created_at": created_at,
+                "updated_at": updated_at
+            })
+        }
+        Ok(None) => {
+            serde_json::json!({
+                "status": "not_found",
+                "error": format!("No knowledge entry with key '{}'", key)
+            })
+        }
+        Err(e) => {
+            serde_json::json!({ "error": format!("DB error: {}", e) })
+        }
+    }
+}
+
+/// Returns a compact index of all knowledge entries (key, title, tags, char_count, updated_at).
+/// Title is derived from the first 80 characters of content.
+pub async fn list(pool: &SqlitePool) -> serde_json::Value {
+    let result = sqlx::query(
+        "SELECT key, content, tags, updated_at FROM knowledge_store ORDER BY updated_at DESC",
+    )
+    .fetch_all(pool)
+    .await;
+
+    match result {
+        Ok(rows) => {
+            let entries: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|row| {
+                    let key: String = row.get("key");
+                    let content: String = row.get("content");
+                    let tags: String = row.get("tags");
+                    let updated_at: String = row.get("updated_at");
+                    // Title = first 80 chars of content, trimmed at word boundary
+                    let title = if content.len() <= 80 {
+                        content.clone()
+                    } else {
+                        let truncated = &content[..80];
+                        match truncated.rfind(' ') {
+                            Some(pos) => format!("{}…", &truncated[..pos]),
+                            None => format!("{}…", truncated),
+                        }
+                    };
+                    serde_json::json!({
+                        "key": key,
+                        "title": title,
+                        "tags": tags,
+                        "char_count": content.len(),
+                        "updated_at": updated_at
+                    })
+                })
+                .collect();
+
+            serde_json::json!({
+                "status": "success",
+                "total": entries.len(),
+                "memories": entries
+            })
+        }
+        Err(e) => {
+            serde_json::json!({ "error": format!("DB error: {}", e) })
+        }
+    }
+}
+
+/// Searches knowledge entries by keyword across key, content, and tags.
+/// Uses SQLite LIKE for broad matching.
+pub async fn search(pool: &SqlitePool, query: &str) -> serde_json::Value {
+    let pattern = format!("%{}%", query);
+    let result = sqlx::query(
+        r#"
+        SELECT key, content, tags, updated_at
+        FROM knowledge_store
+        WHERE key LIKE ?1 OR content LIKE ?1 OR tags LIKE ?1
+        ORDER BY updated_at DESC
+        LIMIT 50
+        "#,
+    )
+    .bind(&pattern)
+    .fetch_all(pool)
+    .await;
+
+    match result {
+        Ok(rows) => {
+            let entries: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|row| {
+                    let key: String = row.get("key");
+                    let content: String = row.get("content");
+                    let tags: String = row.get("tags");
+                    let updated_at: String = row.get("updated_at");
+                    // Return a snippet (first 200 chars) for search results
+                    let snippet = if content.len() <= 200 {
+                        content.clone()
+                    } else {
+                        format!("{}…", &content[..200])
+                    };
+                    serde_json::json!({
+                        "key": key,
+                        "snippet": snippet,
+                        "tags": tags,
+                        "char_count": content.len(),
+                        "updated_at": updated_at
+                    })
+                })
+                .collect();
+
+            serde_json::json!({
+                "status": "success",
+                "query": query,
+                "results": entries.len(),
+                "memories": entries
+            })
+        }
+        Err(e) => {
+            serde_json::json!({ "error": format!("DB error: {}", e) })
+        }
+    }
+}
+
+/// Deletes a knowledge entry by exact key.
+pub async fn delete(pool: &SqlitePool, key: &str) -> serde_json::Value {
+    let result = sqlx::query("DELETE FROM knowledge_store WHERE key = ?")
+        .bind(key)
+        .execute(pool)
+        .await;
+
+    match result {
+        Ok(res) => {
+            if res.rows_affected() > 0 {
+                info!("🗑️ Deleted knowledge: {}", key);
+                serde_json::json!({
+                    "status": "success",
+                    "key": key,
+                    "action": "deleted"
+                })
+            } else {
+                serde_json::json!({
+                    "status": "not_found",
+                    "error": format!("No knowledge entry with key '{}'", key)
+                })
+            }
+        }
+        Err(e) => {
+            serde_json::json!({ "error": format!("DB error: {}", e) })
+        }
+    }
+}
