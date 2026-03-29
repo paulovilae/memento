@@ -176,56 +176,117 @@ pub async fn list(pool: &SqlitePool) -> serde_json::Value {
 /// Searches knowledge entries by keyword across key, content, and tags.
 /// Uses SQLite LIKE for broad matching.
 pub async fn search(pool: &SqlitePool, query: &str) -> serde_json::Value {
-    let pattern = format!("%{}%", query);
-    let result = sqlx::query(
-        r#"
-        SELECT key, content, tags, updated_at
-        FROM knowledge_store
-        WHERE key LIKE ?1 OR content LIKE ?1 OR tags LIKE ?1
-        ORDER BY updated_at DESC
-        LIMIT 50
-        "#,
-    )
-    .bind(&pattern)
-    .fetch_all(pool)
-    .await;
+    let tokens: Vec<String> = query
+        .replace(&['\'', '"', ',', '.', '!', '?'][..], "")
+        .split_whitespace()
+        .filter(|w| w.len() > 3) // Ignore short stop words like "the", "and", "for"
+        .map(|w| format!("%{}%", w))
+        .collect();
 
-    match result {
-        Ok(rows) => {
-            let entries: Vec<serde_json::Value> = rows
-                .iter()
-                .map(|row| {
-                    let key: String = row.get("key");
-                    let content: String = row.get("content");
-                    let tags: String = row.get("tags");
-                    let updated_at: String = row.get("updated_at");
-                    // Return a snippet (first 200 chars) for search results
-                    let snippet = if content.len() <= 200 {
-                        content.clone()
-                    } else {
-                        format!("{}…", &content[..200])
-                    };
-                    serde_json::json!({
-                        "key": key,
-                        "snippet": snippet,
-                        "tags": tags,
-                        "char_count": content.len(),
-                        "updated_at": updated_at
-                    })
-                })
-                .collect();
+    // If no meaningful tokens, use the full query as a fallback
+    let search_tokens = if tokens.is_empty() {
+        vec![format!("%{}%", query)]
+    } else {
+        tokens
+    };
 
-            serde_json::json!({
-                "status": "success",
-                "query": query,
-                "results": entries.len(),
-                "memories": entries
-            })
-        }
-        Err(e) => {
-            serde_json::json!({ "error": format!("DB error: {}", e) })
+    let mut ks_query = String::from("SELECT key, content, tags, updated_at FROM knowledge_store WHERE ");
+    let mut bio_query = String::from("SELECT slug, title, company, duration, tag, summary FROM paulo_bio_experience WHERE ");
+    
+    let mut ks_conditions = Vec::new();
+    let mut bio_conditions = Vec::new();
+    
+    for (i, _) in search_tokens.iter().enumerate() {
+        // Build SQL string placeholders dynamically 
+        // e.g., (key LIKE ? OR content LIKE ? OR tags LIKE ?)
+        let bind_idx = i + 1;
+        ks_conditions.push(format!("(key LIKE ?{} OR content LIKE ?{} OR tags LIKE ?{})", bind_idx, bind_idx, bind_idx));
+        bio_conditions.push(format!("(title LIKE ?{} OR company LIKE ?{} OR tag LIKE ?{} OR summary LIKE ?{})", bind_idx, bind_idx, bind_idx, bind_idx));
+    }
+
+    let ks_final_sql = format!(
+        "SELECT key, content, tags, updated_at FROM knowledge_store WHERE {} ORDER BY updated_at DESC LIMIT 25",
+        ks_conditions.join(" OR ")
+    );
+
+    let bio_final_sql = format!(
+        "SELECT slug, title, company, duration, tag, summary FROM paulo_bio_experience WHERE {} LIMIT 25",
+        bio_conditions.join(" OR ")
+    );
+
+    let mut ks_fetch = sqlx::query(&ks_final_sql);
+    for token in &search_tokens {
+        ks_fetch = ks_fetch.bind(token);
+    }
+    let ks_result = ks_fetch.fetch_all(pool).await;
+
+    let mut bio_fetch = sqlx::query(&bio_final_sql);
+    for token in &search_tokens {
+        bio_fetch = bio_fetch.bind(token);
+    }
+    let bio_result = bio_fetch.fetch_all(pool).await;
+
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+
+    if let Ok(rows) = ks_result {
+        for row in rows {
+            let key: String = row.get("key");
+            let content: String = row.get("content");
+            let tags: String = row.get("tags");
+            let updated_at: String = row.get("updated_at");
+            
+            let snippet = if content.len() <= 200 {
+                content.clone()
+            } else {
+                format!("{}…", &content[..200])
+            };
+            
+            entries.push(serde_json::json!({
+                "key": key,
+                "snippet": snippet,
+                "tags": tags,
+                "char_count": content.len(),
+                "updated_at": updated_at,
+                "source": "knowledge_store"
+            }));
         }
     }
+
+    if let Ok(rows) = bio_result {
+        for row in rows {
+            let slug: String = row.get("slug");
+            let title: String = row.get("title");
+            let company: String = row.get("company");
+            let duration: String = row.get("duration");
+            let tag: String = row.get("tag");
+            let summary: String = row.get("summary");
+            
+            let content = format!("Role: {} at {}\nDuration: {}\nTag: {}\nSummary: {}", title, company, duration, tag, summary);
+            
+            let snippet = if content.len() <= 200 {
+                content.clone()
+            } else {
+                format!("{}…", &content[..200])
+            };
+            
+            entries.push(serde_json::json!({
+                "key": format!("bio_experience_{}", slug),
+                "snippet": snippet,
+                "tags": tag,
+                "char_count": content.len(),
+                "updated_at": "",
+                "source": "paulo_bio_experience",
+                "full_content": content 
+            }));
+        }
+    }
+
+    serde_json::json!({
+        "status": "success",
+        "query": query,
+        "results": entries.len(),
+        "memories": entries
+    })
 }
 
 /// Deletes a knowledge entry by exact key.

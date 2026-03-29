@@ -808,7 +808,7 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                                     let mut obj = serde_json::Map::new();
                                     for col in columns {
                                         let name = col.name();
-                                        // Try JSON first, then string, then integer, then bool
+                                        // Try JSON first, then string, then numerics, then bool
                                         if let Ok(v) = row.try_get::<serde_json::Value, _>(name) {
                                             obj.insert(name.to_string(), v);
                                         } else if let Ok(v) = row.try_get::<String, _>(name) {
@@ -816,6 +816,10 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                                         } else if let Ok(v) = row.try_get::<i64, _>(name) {
                                             obj.insert(name.to_string(), serde_json::json!(v));
                                         } else if let Ok(v) = row.try_get::<i32, _>(name) {
+                                            obj.insert(name.to_string(), serde_json::json!(v));
+                                        } else if let Ok(v) = row.try_get::<f64, _>(name) {
+                                            obj.insert(name.to_string(), serde_json::json!(v));
+                                        } else if let Ok(v) = row.try_get::<f32, _>(name) {
                                             obj.insert(name.to_string(), serde_json::json!(v));
                                         } else if let Ok(v) = row.try_get::<bool, _>(name) {
                                             obj.insert(name.to_string(), serde_json::json!(v));
@@ -1519,6 +1523,21 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                         }),
                         Err(e) => serde_json::json!({ "error": format!("DB error: {}", e) }),
                     }
+                }
+            }
+
+            "vector_search" => {
+                let query = req.payload.get("query").and_then(|v| v.as_str()).unwrap_or("");
+
+                if query.is_empty() {
+                    serde_json::json!({ "error": "Missing 'query' in payload" })
+                } else {
+                    // search returns a serde_json::Value representing the search results directly
+                    let results_value = knowledge::search(&pool, query).await;
+                    serde_json::json!({
+                        "status": "success",
+                        "results": results_value,
+                    })
                 }
             }
 
