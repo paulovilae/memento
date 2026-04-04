@@ -52,7 +52,85 @@ fn test_get_context_default_limit() {
 
     let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
     assert_eq!(msg["action"], "get_context");
-    assert!(msg["payload"]["limit"].is_null(), "Limit should be absent, daemon uses default");
+    assert!(
+        msg["payload"]["limit"].is_null(),
+        "Limit should be absent, daemon uses default"
+    );
+}
+
+#[test]
+fn test_upsert_research_source_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "upsert_research_source",
+        "payload": {
+            "source_id": "source-whales-page-1",
+            "project_id": "whales-2026",
+            "session_id": "whales-session-1",
+            "source_kind": "web_page",
+            "source_uri": "https://example.com/whales",
+            "source_label": "Whale Overview",
+            "title": "Whales Overview",
+            "summary": "General whale anatomy reference.",
+            "content_type": "text/html"
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "upsert_research_source");
+    assert_eq!(msg["payload"]["source_id"], "source-whales-page-1");
+    assert_eq!(msg["payload"]["project_id"], "whales-2026");
+    assert_eq!(msg["payload"]["source_kind"], "web_page");
+}
+
+#[test]
+fn test_list_concept_nodes_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "list_concept_nodes",
+        "payload": {
+            "app_id": "latinos",
+            "search": "whale",
+            "limit": 12
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "list_concept_nodes");
+    assert_eq!(msg["payload"]["app_id"], "latinos");
+    assert_eq!(msg["payload"]["search"], "whale");
+    assert_eq!(msg["payload"]["limit"], 12);
+}
+
+#[test]
+fn test_list_claim_records_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "list_claim_records",
+        "payload": {
+            "project_id": "whales-2026",
+            "concept_id": "concept-whales",
+            "search": "mammal",
+            "limit": 15
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "list_claim_records");
+    assert_eq!(msg["payload"]["project_id"], "whales-2026");
+    assert_eq!(msg["payload"]["concept_id"], "concept-whales");
+    assert_eq!(msg["payload"]["limit"], 15);
+}
+
+#[test]
+fn test_semantic_retention_candidates_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "semantic_retention_candidates",
+        "payload": {
+            "limit": 10
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "semantic_retention_candidates");
+    assert_eq!(msg["payload"]["limit"], 10);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -268,6 +346,159 @@ fn test_list_document_indexes_payload_structure() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Memento v3 Semantic Memory Tests
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_upsert_research_project_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "upsert_research_project",
+        "payload": {
+            "project_id": "whales-2026",
+            "title": "Whale Research",
+            "goal": "Build a reusable knowledge base on whales",
+            "questions_json": {
+                "questions": ["What do we know about whale anatomy?"]
+            },
+            "deliverable_type": "report",
+            "app_id": "os-v3",
+            "status": "active"
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "upsert_research_project");
+    assert_eq!(msg["payload"]["project_id"], "whales-2026");
+    assert_eq!(msg["payload"]["title"], "Whale Research");
+}
+
+#[test]
+fn test_create_research_session_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "create_research_session",
+        "payload": {
+            "session_id": "whales-2026-session-01",
+            "project_id": "whales-2026",
+            "title": "General whale anatomy survey",
+            "brief": "Collect core facts about whale biology",
+            "channel": "web_widget"
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "create_research_session");
+    assert_eq!(msg["payload"]["session_id"], "whales-2026-session-01");
+    assert_eq!(msg["payload"]["project_id"], "whales-2026");
+}
+
+#[test]
+fn test_append_claim_record_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "append_claim_record",
+        "payload": {
+            "claim_id": "claim-whales-mammals",
+            "claim_text": "Whales are mammals.",
+            "primary_concept_id": "concept-whales",
+            "project_id": "whales-2026",
+            "session_id": "whales-2026-session-01",
+            "claim_type": "fact",
+            "confidence": 0.98
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "append_claim_record");
+    assert_eq!(msg["payload"]["claim_id"], "claim-whales-mammals");
+    assert_eq!(msg["payload"]["primary_concept_id"], "concept-whales");
+}
+
+#[test]
+fn test_upsert_concept_node_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "upsert_concept_node",
+        "payload": {
+            "concept_id": "concept-whales",
+            "canonical_name": "Whales",
+            "summary": "Large marine mammals."
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "upsert_concept_node");
+    assert_eq!(msg["payload"]["concept_id"], "concept-whales");
+    assert_eq!(msg["payload"]["canonical_name"], "Whales");
+}
+
+#[test]
+fn test_append_evidence_record_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "append_evidence_record",
+        "payload": {
+            "evidence_id": "evidence-whales-mammals-01",
+            "claim_id": "claim-whales-mammals",
+            "snippet": "Whales are warm-blooded mammals that nurse their young.",
+            "source_kind": "web",
+            "source_ref": "https://example.org/whales",
+            "locator": "section:introduction",
+            "confidence": 0.93
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "append_evidence_record");
+    assert_eq!(msg["payload"]["evidence_id"], "evidence-whales-mammals-01");
+    assert_eq!(msg["payload"]["claim_id"], "claim-whales-mammals");
+}
+
+#[test]
+fn test_link_concepts_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "link_concepts",
+        "payload": {
+            "edge_id": "edge-whales-mammals",
+            "from_concept_id": "concept-whales",
+            "to_concept_id": "concept-mammals",
+            "relation_type": "is_a",
+            "weight": 1.0
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "link_concepts");
+    assert_eq!(msg["payload"]["relation_type"], "is_a");
+}
+
+#[test]
+fn test_expand_concept_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "expand_concept",
+        "payload": {
+            "concept_id": "concept-whales",
+            "limit": 15
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "expand_concept");
+    assert_eq!(msg["payload"]["concept_id"], "concept-whales");
+    assert_eq!(msg["payload"]["limit"], 15);
+}
+
+#[test]
+fn test_trace_claim_provenance_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "trace_claim_provenance",
+        "payload": {
+            "claim_id": "claim-whales-mammals"
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "trace_claim_provenance");
+    assert_eq!(msg["payload"]["claim_id"], "claim-whales-mammals");
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // App Registry Tests
 // ═══════════════════════════════════════════════════════════════════
 
@@ -323,6 +554,24 @@ fn test_query_app_rejects_non_select() {
             query
         );
     }
+}
+
+#[test]
+fn test_execute_app_payload() {
+    let payload = serde_json::json!({
+        "action": "execute_app",
+        "payload": {
+            "app": "latinos",
+            "query": "INSERT INTO stock_research (ticker, research_date, raw_data, analysis_summary) VALUES ('AAPL', NOW(), '{}'::jsonb, 'ok')"
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "execute_app");
+    assert_eq!(msg["payload"]["app"], "latinos");
+    let query = msg["payload"]["query"].as_str().unwrap();
+    let trimmed = query.trim().to_uppercase();
+    assert!(trimmed.starts_with("INSERT"));
 }
 
 #[test]
@@ -420,12 +669,24 @@ fn test_all_ipc_actions_cataloged() {
         "get_document_index",
         "list_document_indexes",
         "query_document_index",
+        // Semantic Memory / Memento v3
+        "upsert_research_project",
+        "get_research_project",
+        "list_research_projects",
+        "create_research_session",
+        "upsert_concept_node",
+        "append_claim_record",
+        "append_evidence_record",
+        "link_concepts",
+        "expand_concept",
+        "trace_claim_provenance",
+        "semantic_memory_counts",
         // App Registry
         "list_apps",
         "query_app",
     ];
 
-    assert_eq!(known_actions.len(), 17, "Expected 17 known IPC actions");
+    assert_eq!(known_actions.len(), 28, "Expected 28 known IPC actions");
 
     // Verify no duplicates
     let mut sorted = known_actions.clone();
@@ -450,6 +711,10 @@ fn test_ipc_message_format_is_consistent() {
         serde_json::json!({"action": "store_knowledge", "payload": {"key": "k", "content": "c", "tags": ""}}),
         serde_json::json!({"action": "list_document_indexes", "payload": {"app_id": "vetra"}}),
         serde_json::json!({"action": "query_document_index", "payload": {"app_id": "vetra", "query": "remote work policy"}}),
+        serde_json::json!({"action": "upsert_research_project", "payload": {"project_id": "p", "title": "Project"}}),
+        serde_json::json!({"action": "create_research_session", "payload": {"session_id": "s", "project_id": "p"}}),
+        serde_json::json!({"action": "append_claim_record", "payload": {"claim_id": "c", "claim_text": "x", "primary_concept_id": "concept"}}),
+        serde_json::json!({"action": "trace_claim_provenance", "payload": {"claim_id": "c"}}),
     ];
 
     for msg in &test_messages {

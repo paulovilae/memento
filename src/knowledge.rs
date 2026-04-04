@@ -5,9 +5,10 @@
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqlitePool;
 use sqlx::Row;
-use tracing::{info, error};
+use tracing::{error, info};
 
 /// Represents a knowledge entry stored in the `knowledge_store` table.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeEntry {
     pub key: String,
@@ -17,6 +18,7 @@ pub struct KnowledgeEntry {
 }
 
 /// A compact index entry returned by `list()`.
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct KnowledgeIndex {
     pub key: String,
@@ -48,12 +50,7 @@ pub async fn init_knowledge_table(pool: &SqlitePool) -> anyhow::Result<()> {
 
 /// Upserts a knowledge entry. If the key already exists, content and tags
 /// are updated and `updated_at` is refreshed.
-pub async fn store(
-    pool: &SqlitePool,
-    key: &str,
-    content: &str,
-    tags: &str,
-) -> serde_json::Value {
+pub async fn store(pool: &SqlitePool, key: &str, content: &str, tags: &str) -> serde_json::Value {
     let result = sqlx::query(
         r#"
         INSERT INTO knowledge_store (key, content, tags, updated_at)
@@ -190,18 +187,21 @@ pub async fn search(pool: &SqlitePool, query: &str) -> serde_json::Value {
         tokens
     };
 
-    let mut ks_query = String::from("SELECT key, content, tags, updated_at FROM knowledge_store WHERE ");
-    let mut bio_query = String::from("SELECT slug, title, company, duration, tag, summary FROM paulo_bio_experience WHERE ");
-    
     let mut ks_conditions = Vec::new();
     let mut bio_conditions = Vec::new();
-    
+
     for (i, _) in search_tokens.iter().enumerate() {
-        // Build SQL string placeholders dynamically 
+        // Build SQL string placeholders dynamically
         // e.g., (key LIKE ? OR content LIKE ? OR tags LIKE ?)
         let bind_idx = i + 1;
-        ks_conditions.push(format!("(key LIKE ?{} OR content LIKE ?{} OR tags LIKE ?{})", bind_idx, bind_idx, bind_idx));
-        bio_conditions.push(format!("(title LIKE ?{} OR company LIKE ?{} OR tag LIKE ?{} OR summary LIKE ?{})", bind_idx, bind_idx, bind_idx, bind_idx));
+        ks_conditions.push(format!(
+            "(key LIKE ?{} OR content LIKE ?{} OR tags LIKE ?{})",
+            bind_idx, bind_idx, bind_idx
+        ));
+        bio_conditions.push(format!(
+            "(title LIKE ?{} OR company LIKE ?{} OR tag LIKE ?{} OR summary LIKE ?{})",
+            bind_idx, bind_idx, bind_idx, bind_idx
+        ));
     }
 
     let ks_final_sql = format!(
@@ -234,13 +234,13 @@ pub async fn search(pool: &SqlitePool, query: &str) -> serde_json::Value {
             let content: String = row.get("content");
             let tags: String = row.get("tags");
             let updated_at: String = row.get("updated_at");
-            
+
             let snippet = if content.len() <= 200 {
                 content.clone()
             } else {
                 format!("{}…", &content[..200])
             };
-            
+
             entries.push(serde_json::json!({
                 "key": key,
                 "snippet": snippet,
@@ -260,15 +260,18 @@ pub async fn search(pool: &SqlitePool, query: &str) -> serde_json::Value {
             let duration: String = row.get("duration");
             let tag: String = row.get("tag");
             let summary: String = row.get("summary");
-            
-            let content = format!("Role: {} at {}\nDuration: {}\nTag: {}\nSummary: {}", title, company, duration, tag, summary);
-            
+
+            let content = format!(
+                "Role: {} at {}\nDuration: {}\nTag: {}\nSummary: {}",
+                title, company, duration, tag, summary
+            );
+
             let snippet = if content.len() <= 200 {
                 content.clone()
             } else {
                 format!("{}…", &content[..200])
             };
-            
+
             entries.push(serde_json::json!({
                 "key": format!("bio_experience_{}", slug),
                 "snippet": snippet,
@@ -276,7 +279,7 @@ pub async fn search(pool: &SqlitePool, query: &str) -> serde_json::Value {
                 "char_count": content.len(),
                 "updated_at": "",
                 "source": "paulo_bio_experience",
-                "full_content": content 
+                "full_content": content
             }));
         }
     }

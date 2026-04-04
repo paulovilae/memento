@@ -22,7 +22,10 @@ fn test_store_knowledge_payload() {
     assert_eq!(msg["action"], "store_knowledge");
     assert_eq!(msg["payload"]["key"], "server_specs");
     assert!(!msg["payload"]["content"].as_str().unwrap().is_empty());
-    assert!(msg["payload"]["tags"].as_str().unwrap().contains("hardware"));
+    assert!(msg["payload"]["tags"]
+        .as_str()
+        .unwrap()
+        .contains("hardware"));
 }
 
 #[test]

@@ -4,7 +4,7 @@ use serde::Deserialize;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use std::collections::HashMap;
 use std::path::Path;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 /// A single app entry in etc/apps.toml
 #[derive(Debug, Deserialize)]
@@ -51,8 +51,10 @@ struct DatabaseConfig {
 /// Holds a live Postgres connection pool for an app
 pub struct AppConnection {
     pub name: String,
+    #[allow(dead_code)]
     pub slug: String,
     pub description: String,
+    #[allow(dead_code)]
     pub schema_prefix: String,
     pub key_tables: Vec<String>,
     pub pool: PgPool,
@@ -109,7 +111,10 @@ pub async fn discover_apps(os_root: &str) -> HashMap<String, AppConnection> {
         let db_config = match manifest.database {
             Some(ref db) if db.db_type == "postgres" => db,
             _ => {
-                info!("  ⏭️ {} — no postgres database, skipping", manifest.app.name);
+                info!(
+                    "  ⏭️ {} — no postgres database, skipping",
+                    manifest.app.name
+                );
                 continue;
             }
         };
@@ -118,7 +123,10 @@ pub async fn discover_apps(os_root: &str) -> HashMap<String, AppConnection> {
         let db_url = match std::env::var(&db_config.url_env) {
             Ok(url) => url,
             Err(_) => {
-                warn!("  ⚠️ {} — env var {} not set, skipping", manifest.app.name, db_config.url_env);
+                warn!(
+                    "  ⚠️ {} — env var {} not set, skipping",
+                    manifest.app.name, db_config.url_env
+                );
                 continue;
             }
         };
@@ -130,15 +138,21 @@ pub async fn discover_apps(os_root: &str) -> HashMap<String, AppConnection> {
             .await
         {
             Ok(pool) => {
-                info!("  ✅ {} — connected to Postgres via {}", manifest.app.name, db_config.url_env);
-                connections.insert(entry.slug.clone(), AppConnection {
-                    name: manifest.app.name,
-                    slug: manifest.app.slug,
-                    description: manifest.app.description,
-                    schema_prefix: db_config.schema_prefix.clone().unwrap_or_default(),
-                    key_tables: db_config.key_tables.clone().unwrap_or_default(),
-                    pool,
-                });
+                info!(
+                    "  ✅ {} — connected to Postgres via {}",
+                    manifest.app.name, db_config.url_env
+                );
+                connections.insert(
+                    entry.slug.clone(),
+                    AppConnection {
+                        name: manifest.app.name,
+                        slug: manifest.app.slug,
+                        description: manifest.app.description,
+                        schema_prefix: db_config.schema_prefix.clone().unwrap_or_default(),
+                        key_tables: db_config.key_tables.clone().unwrap_or_default(),
+                        pool,
+                    },
+                );
             }
             Err(e) => {
                 error!("  ❌ {} — failed to connect: {}", manifest.app.name, e);

@@ -354,6 +354,22 @@ The `memento-mcp` binary exposes 5 tools over MCP Stdio transport:
 
 ---
 
+## Semantic Memory Roadmap
+
+The next planned expansion is `Memento v3`, which adds:
+
+- research projects and sessions
+- concept graph memory
+- claims and evidence with provenance
+- consolidation across many research sessions
+- retention, compression, archive, and deletion policy
+
+Design reference:
+
+- [Apps/OS-v3/docs/MEMENTO_V3_SEMANTIC_MEMORY_PLAN.md](/home/paulo/Programs/apps/OS/Apps/OS-v3/docs/MEMENTO_V3_SEMANTIC_MEMORY_PLAN.md)
+
+---
+
 ## Folder Ingestion
 
 Memento watches configured directories and extracts text from:

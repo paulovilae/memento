@@ -1,21 +1,22 @@
-use std::os::unix::fs::PermissionsExt;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::net::{UnixListener, UnixStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{info, error, Level};
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::{Column, Row};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{UnixListener, UnixStream};
+use tracing::{error, info, Level};
 
+mod app_registry;
+pub mod config;
+mod document_index;
 mod hardware;
 mod ingestion;
-mod app_registry;
 mod knowledge;
-mod document_index;
-pub mod config;
+mod semantic_memory;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct IpcMessage {
@@ -79,7 +80,9 @@ async fn ensure_sqlite_column(
 ) -> anyhow::Result<()> {
     let pragma = format!("PRAGMA table_info({table})");
     let rows = sqlx::query(&pragma).fetch_all(pool).await?;
-    let exists = rows.iter().any(|row| row.get::<String, _>("name") == column);
+    let exists = rows
+        .iter()
+        .any(|row| row.get::<String, _>("name") == column);
     if !exists {
         let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {column_definition}");
         sqlx::query(&sql).execute(pool).await?;
@@ -95,7 +98,11 @@ fn trim_message_for_budget(content: &str, max_chars: usize) -> String {
 
     let keep = max_chars.saturating_sub(48);
     let trimmed: String = content.chars().take(keep).collect();
-    format!("{} [trimmed {} chars]", trimmed, char_count.saturating_sub(keep))
+    format!(
+        "{} [trimmed {} chars]",
+        trimmed,
+        char_count.saturating_sub(keep)
+    )
 }
 
 fn tokenize_memory(text: &str) -> HashSet<String> {
@@ -145,7 +152,10 @@ fn score_memory_message(
     }
 }
 
-async fn load_memory_profile(pool: &SqlitePool, chat_id: &str) -> anyhow::Result<AdaptiveMemoryProfile> {
+async fn load_memory_profile(
+    pool: &SqlitePool,
+    chat_id: &str,
+) -> anyhow::Result<AdaptiveMemoryProfile> {
     let default_profile = default_memory_profile();
     let row = sqlx::query(
         r#"
@@ -192,7 +202,11 @@ async fn load_memory_profile(pool: &SqlitePool, chat_id: &str) -> anyhow::Result
     }
 }
 
-async fn store_memory_profile(pool: &SqlitePool, chat_id: &str, profile: &AdaptiveMemoryProfile) -> anyhow::Result<()> {
+async fn store_memory_profile(
+    pool: &SqlitePool,
+    chat_id: &str,
+    profile: &AdaptiveMemoryProfile,
+) -> anyhow::Result<()> {
     sqlx::query(
         r#"
         INSERT INTO adaptive_memory_profiles (
@@ -265,7 +279,11 @@ async fn record_feedback(
         _ => {}
     }
 
-    profile.assistant_weight = clamp_f64(1.0 - profile.recency_weight - profile.overlap_weight, 0.0, 0.3);
+    profile.assistant_weight = clamp_f64(
+        1.0 - profile.recency_weight - profile.overlap_weight,
+        0.0,
+        0.3,
+    );
     store_memory_profile(pool, chat_id, &profile).await?;
     Ok(profile)
 }
@@ -275,11 +293,12 @@ async fn init_db() -> anyhow::Result<SqlitePool> {
     path.push("memento");
     std::fs::create_dir_all(&path).unwrap_or_default();
     path.push("memory.db");
-    
+
     let db_url = format!("sqlite://{}?mode=rwc", path.to_string_lossy());
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
-        .connect(&db_url).await?;
+        .connect(&db_url)
+        .await?;
 
     sqlx::query(
         r#"
@@ -290,7 +309,7 @@ async fn init_db() -> anyhow::Result<SqlitePool> {
             content TEXT NOT NULL,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
-        "#
+        "#,
     )
     .execute(&pool)
     .await?;
@@ -343,7 +362,7 @@ async fn init_db() -> anyhow::Result<SqlitePool> {
             posterior_json TEXT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
-        "#
+        "#,
     )
     .execute(&pool)
     .await?;
@@ -357,7 +376,7 @@ async fn init_db() -> anyhow::Result<SqlitePool> {
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, domain)
         )
-        "#
+        "#,
     )
     .execute(&pool)
     .await?;
@@ -378,17 +397,29 @@ async fn init_db() -> anyhow::Result<SqlitePool> {
             content TEXT NOT NULL,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
-        "#
+        "#,
     )
     .execute(&pool)
     .await?;
 
-    ensure_sqlite_column(&pool, "scoped_memory", "memory_type", "TEXT NOT NULL DEFAULT 'event'").await?;
+    ensure_sqlite_column(
+        &pool,
+        "scoped_memory",
+        "memory_type",
+        "TEXT NOT NULL DEFAULT 'event'",
+    )
+    .await?;
     ensure_sqlite_column(&pool, "scoped_memory", "content_json", "TEXT").await?;
     ensure_sqlite_column(&pool, "scoped_memory", "confidence", "REAL").await?;
     ensure_sqlite_column(&pool, "scoped_memory", "provenance_refs", "TEXT").await?;
     ensure_sqlite_column(&pool, "scoped_memory", "derivation_method", "TEXT").await?;
-    ensure_sqlite_column(&pool, "scoped_memory", "status", "TEXT NOT NULL DEFAULT 'active'").await?;
+    ensure_sqlite_column(
+        &pool,
+        "scoped_memory",
+        "status",
+        "TEXT NOT NULL DEFAULT 'active'",
+    )
+    .await?;
     ensure_sqlite_column(&pool, "scoped_memory", "expires_at", "DATETIME").await?;
 
     // ─── Virtual Office: Audit Log ───────────────────────────────
@@ -407,7 +438,7 @@ async fn init_db() -> anyhow::Result<SqlitePool> {
             session_id TEXT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
-        "#
+        "#,
     )
     .execute(&pool)
     .await?;
@@ -425,7 +456,7 @@ async fn init_db() -> anyhow::Result<SqlitePool> {
             summary TEXT NOT NULL,
             sort_order INTEGER DEFAULT 0
         )
-        "#
+        "#,
     )
     .execute(&pool)
     .await?;
@@ -442,7 +473,7 @@ async fn init_db() -> anyhow::Result<SqlitePool> {
             summary TEXT,
             sort_order INTEGER DEFAULT 0
         )
-        "#
+        "#,
     )
     .execute(&pool)
     .await?;
@@ -455,12 +486,13 @@ async fn init_db() -> anyhow::Result<SqlitePool> {
             name TEXT NOT NULL,
             level TEXT DEFAULT 'expert'
         )
-        "#
+        "#,
     )
     .execute(&pool)
     .await?;
 
     document_index::init_tables(&pool).await?;
+    semantic_memory::init_tables(&pool).await?;
 
     Ok(pool)
 }
@@ -469,7 +501,7 @@ async fn init_db() -> anyhow::Result<SqlitePool> {
 async fn main() -> anyhow::Result<()> {
     // 0. Load environment variables from .env
     dotenvy::dotenv().ok();
-    
+
     // 1. Initialize Tracing
     tracing_subscriber::fmt().with_max_level(Level::INFO).init();
     info!("🧠 Starting Memento Local Node (ImagineOS Mesh)...");
@@ -489,11 +521,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // 4. Initialize Memory Database
-    let db_pool = init_db().await.expect("Failed to initialize SQLite database");
+    let db_pool = init_db()
+        .await
+        .expect("Failed to initialize SQLite database");
     info!("💾 Memory database initialized");
 
     // 4b. Initialize Knowledge Store table
-    knowledge::init_knowledge_table(&db_pool).await
+    knowledge::init_knowledge_table(&db_pool)
+        .await
         .expect("Failed to initialize knowledge store");
 
     // 5. Discover App Databases (reads OS/etc/apps.toml)
@@ -503,14 +538,14 @@ async fn main() -> anyhow::Result<()> {
 
     // 6. Setup Unix Domain Socket (UDS) for Zero-Copy IPC with Hera/Imaginclaw
     let socket_path = "/tmp/memento.sock";
-    
+
     // Clean up old socket if it exists
     if Path::new(socket_path).exists() {
         std::fs::remove_file(socket_path)?;
     }
 
     let uds_listener = UnixListener::bind(socket_path)?;
-    
+
     // Set permissions so everyone can read/write to the socket
     let mut perms = std::fs::metadata(socket_path)?.permissions();
     perms.set_mode(0o777);
@@ -543,7 +578,11 @@ async fn handle_uds_connections(listener: UnixListener, pool: SqlitePool, apps: 
     }
 }
 
-async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppConnections) -> anyhow::Result<()> {
+async fn process_uds_stream(
+    mut stream: UnixStream,
+    pool: SqlitePool,
+    apps: AppConnections,
+) -> anyhow::Result<()> {
     let mut buffer = vec![0; 8192 * 4];
     loop {
         let n = stream.read(&mut buffer).await?;
@@ -552,7 +591,7 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
         }
 
         let msg_str = std::str::from_utf8(&buffer[..n])?;
-        
+
         let req: IpcMessage = match serde_json::from_str(msg_str) {
             Ok(r) => r,
             Err(e) => {
@@ -566,7 +605,7 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
             "save_memory" => {
                 if let Ok(entry) = serde_json::from_value::<MemoryEntry>(req.payload) {
                     let result = sqlx::query(
-                        "INSERT INTO memento_memory (chat_id, role, content) VALUES (?, ?, ?)"
+                        "INSERT INTO memento_memory (chat_id, role, content) VALUES (?, ?, ?)",
                     )
                     .bind(&entry.chat_id)
                     .bind(&entry.role)
@@ -583,14 +622,27 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                 }
             }
             "get_context" => {
-                let chat_id = req.payload.get("chat_id").and_then(|v| v.as_str()).unwrap_or("");
-                let limit_hint = req.payload.get("limit").and_then(|v| v.as_i64()).unwrap_or(6);
-                let query_text = req.payload.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let chat_id = req
+                    .payload
+                    .get("chat_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let limit_hint = req
+                    .payload
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(6);
+                let query_text = req
+                    .payload
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
                 match load_memory_profile(&pool, chat_id).await {
                     Ok(profile) => {
                         let effective_limit = clamp_i64(limit_hint.min(profile.recent_limit), 2, 8);
-                        let candidate_limit = clamp_i64(profile.candidate_limit.max(effective_limit * 2), 8, 32);
+                        let candidate_limit =
+                            clamp_i64(profile.candidate_limit.max(effective_limit * 2), 8, 32);
                         let rows_result = sqlx::query(
                             "SELECT role, content FROM memento_memory WHERE chat_id = ? ORDER BY timestamp DESC LIMIT ?"
                         )
@@ -618,7 +670,11 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                                     ));
                                 }
 
-                                scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                                scored.sort_by(|a, b| {
+                                    b.score
+                                        .partial_cmp(&a.score)
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                });
 
                                 let mut picked = Vec::new();
                                 if query_tokens.is_empty() {
@@ -627,25 +683,37 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                                         .take(effective_limit as usize)
                                         .collect::<Vec<_>>();
                                 } else {
-                                    for message in scored.iter().filter(|message| message.overlap_score > 0.0) {
+                                    for message in
+                                        scored.iter().filter(|message| message.overlap_score > 0.0)
+                                    {
                                         if picked.len() >= effective_limit as usize {
                                             break;
                                         }
                                         picked.push(message.clone());
                                     }
 
-                                    for message in scored.iter().filter(|message| message.recency_score >= 0.75) {
+                                    for message in scored
+                                        .iter()
+                                        .filter(|message| message.recency_score >= 0.75)
+                                    {
                                         if picked.len() >= effective_limit as usize {
                                             break;
                                         }
-                                        if picked.iter().any(|existing| existing.role == message.role && existing.content == message.content) {
+                                        if picked.iter().any(|existing| {
+                                            existing.role == message.role
+                                                && existing.content == message.content
+                                        }) {
                                             continue;
                                         }
                                         picked.push(message.clone());
                                     }
                                 }
 
-                                picked.sort_by(|a, b| a.recency_score.partial_cmp(&b.recency_score).unwrap_or(std::cmp::Ordering::Equal));
+                                picked.sort_by(|a, b| {
+                                    a.recency_score
+                                        .partial_cmp(&b.recency_score)
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                });
 
                                 let mut total_chars = 0usize;
                                 let mut messages = Vec::new();
@@ -657,10 +725,14 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                                         break;
                                     }
 
-                                    let mut content = trim_message_for_budget(&message.content, max_message_chars);
+                                    let mut content = trim_message_for_budget(
+                                        &message.content,
+                                        max_message_chars,
+                                    );
                                     let remaining = max_total_chars.saturating_sub(total_chars);
                                     if content.chars().count() > remaining {
-                                        content = trim_message_for_budget(&content, remaining.max(80));
+                                        content =
+                                            trim_message_for_budget(&content, remaining.max(80));
                                     }
 
                                     if content.trim().is_empty() {
@@ -698,8 +770,16 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                 }
             }
             "record_context_feedback" => {
-                let chat_id = req.payload.get("chat_id").and_then(|v| v.as_str()).unwrap_or("");
-                let signal = req.payload.get("signal").and_then(|v| v.as_str()).unwrap_or("");
+                let chat_id = req
+                    .payload
+                    .get("chat_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let signal = req
+                    .payload
+                    .get("signal")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let observed_chars = req.payload.get("observed_chars").and_then(|v| v.as_i64());
                 let query = req.payload.get("query").and_then(|v| v.as_str());
 
@@ -724,7 +804,11 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                 }
             }
             "get_context_profile" => {
-                let chat_id = req.payload.get("chat_id").and_then(|v| v.as_str()).unwrap_or("");
+                let chat_id = req
+                    .payload
+                    .get("chat_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if chat_id.is_empty() {
                     serde_json::json!({ "error": "Missing 'chat_id' in payload" })
                 } else {
@@ -746,7 +830,11 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                 }
             }
             "clear_context" => {
-                let chat_id = req.payload.get("chat_id").and_then(|v| v.as_str()).unwrap_or("");
+                let chat_id = req
+                    .payload
+                    .get("chat_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if chat_id.is_empty() {
                     serde_json::json!({ "error": "Missing 'chat_id' in payload" })
                 } else {
@@ -763,24 +851,36 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
 
             // ─── App Registry Actions ──────────────────────────────────
             "list_apps" => {
-                let app_list: Vec<serde_json::Value> = apps.iter().map(|(slug, conn)| {
-                    serde_json::json!({
-                        "slug": slug,
-                        "name": conn.name,
-                        "description": conn.description,
-                        "key_tables": conn.key_tables,
+                let app_list: Vec<serde_json::Value> = apps
+                    .iter()
+                    .map(|(slug, conn)| {
+                        serde_json::json!({
+                            "slug": slug,
+                            "name": conn.name,
+                            "description": conn.description,
+                            "key_tables": conn.key_tables,
+                        })
                     })
-                }).collect();
+                    .collect();
                 serde_json::json!({ "status": "success", "apps": app_list })
             }
 
             "query_app" => {
-                let app_slug = req.payload.get("app")
-                    .and_then(|v| v.as_str()).unwrap_or("");
-                let query = req.payload.get("query")
-                    .and_then(|v| v.as_str()).unwrap_or("");
-                let limit = req.payload.get("limit")
-                    .and_then(|v| v.as_i64()).unwrap_or(50);
+                let app_slug = req
+                    .payload
+                    .get("app")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let query = req
+                    .payload
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let limit = req
+                    .payload
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(50);
 
                 if query.is_empty() {
                     serde_json::json!({ "error": "Missing 'query' in payload" })
@@ -797,38 +897,42 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                             format!("{} LIMIT {}", query, limit)
                         };
 
-                        match sqlx::query(&safe_query)
-                            .fetch_all(&app_conn.pool)
-                            .await
-                        {
+                        match sqlx::query(&safe_query).fetch_all(&app_conn.pool).await {
                             Ok(rows) => {
-                                let results: Vec<serde_json::Value> = rows.iter().map(|row| {
-                                    // Convert each row to a JSON object
-                                    let columns = row.columns();
-                                    let mut obj = serde_json::Map::new();
-                                    for col in columns {
-                                        let name = col.name();
-                                        // Try JSON first, then string, then numerics, then bool
-                                        if let Ok(v) = row.try_get::<serde_json::Value, _>(name) {
-                                            obj.insert(name.to_string(), v);
-                                        } else if let Ok(v) = row.try_get::<String, _>(name) {
-                                            obj.insert(name.to_string(), serde_json::json!(v));
-                                        } else if let Ok(v) = row.try_get::<i64, _>(name) {
-                                            obj.insert(name.to_string(), serde_json::json!(v));
-                                        } else if let Ok(v) = row.try_get::<i32, _>(name) {
-                                            obj.insert(name.to_string(), serde_json::json!(v));
-                                        } else if let Ok(v) = row.try_get::<f64, _>(name) {
-                                            obj.insert(name.to_string(), serde_json::json!(v));
-                                        } else if let Ok(v) = row.try_get::<f32, _>(name) {
-                                            obj.insert(name.to_string(), serde_json::json!(v));
-                                        } else if let Ok(v) = row.try_get::<bool, _>(name) {
-                                            obj.insert(name.to_string(), serde_json::json!(v));
-                                        } else {
-                                            obj.insert(name.to_string(), serde_json::Value::Null);
+                                let results: Vec<serde_json::Value> = rows
+                                    .iter()
+                                    .map(|row| {
+                                        // Convert each row to a JSON object
+                                        let columns = row.columns();
+                                        let mut obj = serde_json::Map::new();
+                                        for col in columns {
+                                            let name = col.name();
+                                            // Try JSON first, then string, then numerics, then bool
+                                            if let Ok(v) = row.try_get::<serde_json::Value, _>(name)
+                                            {
+                                                obj.insert(name.to_string(), v);
+                                            } else if let Ok(v) = row.try_get::<String, _>(name) {
+                                                obj.insert(name.to_string(), serde_json::json!(v));
+                                            } else if let Ok(v) = row.try_get::<i64, _>(name) {
+                                                obj.insert(name.to_string(), serde_json::json!(v));
+                                            } else if let Ok(v) = row.try_get::<i32, _>(name) {
+                                                obj.insert(name.to_string(), serde_json::json!(v));
+                                            } else if let Ok(v) = row.try_get::<f64, _>(name) {
+                                                obj.insert(name.to_string(), serde_json::json!(v));
+                                            } else if let Ok(v) = row.try_get::<f32, _>(name) {
+                                                obj.insert(name.to_string(), serde_json::json!(v));
+                                            } else if let Ok(v) = row.try_get::<bool, _>(name) {
+                                                obj.insert(name.to_string(), serde_json::json!(v));
+                                            } else {
+                                                obj.insert(
+                                                    name.to_string(),
+                                                    serde_json::Value::Null,
+                                                );
+                                            }
                                         }
-                                    }
-                                    serde_json::Value::Object(obj)
-                                }).collect();
+                                        serde_json::Value::Object(obj)
+                                    })
+                                    .collect();
                                 serde_json::json!({
                                     "status": "success",
                                     "app": app_slug,
@@ -848,11 +952,57 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                 }
             }
 
+            "execute_app" => {
+                let app_slug = req
+                    .payload
+                    .get("app")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let query = req
+                    .payload
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                if query.is_empty() {
+                    serde_json::json!({ "error": "Missing 'query' in payload" })
+                } else if let Some(app_conn) = apps.get(app_slug) {
+                    let normalized = query.trim();
+                    let stripped = normalized.trim_end_matches(';').trim();
+                    let uppercase = stripped.to_uppercase();
+
+                    if !uppercase.starts_with("INSERT")
+                        && !uppercase.starts_with("UPDATE")
+                        && !uppercase.starts_with("DELETE")
+                    {
+                        serde_json::json!({ "error": "Only INSERT, UPDATE, or DELETE queries are allowed" })
+                    } else {
+                        match sqlx::query(normalized).execute(&app_conn.pool).await {
+                            Ok(result) => serde_json::json!({
+                                "status": "success",
+                                "app": app_slug,
+                                "rows_affected": result.rows_affected(),
+                            }),
+                            Err(e) => serde_json::json!({ "error": format!("Query error: {}", e) }),
+                        }
+                    }
+                } else {
+                    let available: Vec<&String> = apps.keys().collect();
+                    serde_json::json!({
+                        "error": format!("App '{}' not found", app_slug),
+                        "available_apps": available
+                    })
+                }
+            }
+
             // ─── Schema Auto-Discovery ──────────────────────────────
             "describe_app" => {
-                let app_slug = req.payload.get("app")
-                    .and_then(|v| v.as_str()).unwrap_or("");
-                
+                let app_slug = req
+                    .payload
+                    .get("app")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
                 if let Some(app_conn) = apps.get(app_slug) {
                     // Auto-discover ALL public tables + their columns
                     let schema_query = r#"
@@ -862,18 +1012,17 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                         WHERE c.table_schema = 'public' AND t.table_type = 'BASE TABLE'
                         ORDER BY c.table_name, c.ordinal_position
                     "#;
-                    
-                    match sqlx::query(schema_query)
-                        .fetch_all(&app_conn.pool)
-                        .await
-                    {
+
+                    match sqlx::query(schema_query).fetch_all(&app_conn.pool).await {
                         Ok(rows) => {
-                            let mut tables: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+                            let mut tables: serde_json::Map<String, serde_json::Value> =
+                                serde_json::Map::new();
                             for row in &rows {
                                 let table: String = row.get("table_name");
                                 let col: String = row.get("column_name");
                                 let dtype: String = row.get("data_type");
-                                let entry = tables.entry(table).or_insert_with(|| serde_json::json!([]));
+                                let entry =
+                                    tables.entry(table).or_insert_with(|| serde_json::json!([]));
                                 if let Some(arr) = entry.as_array_mut() {
                                     arr.push(serde_json::json!({"column": col, "type": dtype}));
                                 }
@@ -885,7 +1034,9 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                                 "schema": tables
                             })
                         }
-                        Err(e) => serde_json::json!({ "error": format!("Schema query error: {}", e) }),
+                        Err(e) => {
+                            serde_json::json!({ "error": format!("Schema query error: {}", e) })
+                        }
                     }
                 } else {
                     let available: Vec<&String> = apps.keys().collect();
@@ -909,12 +1060,14 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                     "#;
                     match sqlx::query(schema_query).fetch_all(&app_conn.pool).await {
                         Ok(rows) => {
-                            let mut tables: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+                            let mut tables: serde_json::Map<String, serde_json::Value> =
+                                serde_json::Map::new();
                             for row in &rows {
                                 let table: String = row.get("table_name");
                                 let col: String = row.get("column_name");
                                 let dtype: String = row.get("data_type");
-                                let entry = tables.entry(table).or_insert_with(|| serde_json::json!([]));
+                                let entry =
+                                    tables.entry(table).or_insert_with(|| serde_json::json!([]));
                                 if let Some(arr) = entry.as_array_mut() {
                                     arr.push(serde_json::json!({"column": col, "type": dtype}));
                                 }
@@ -922,7 +1075,10 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                             all_schemas.insert(slug.clone(), serde_json::json!(tables));
                         }
                         Err(e) => {
-                            all_schemas.insert(slug.clone(), serde_json::json!({"error": format!("{}", e)}));
+                            all_schemas.insert(
+                                slug.clone(),
+                                serde_json::json!({"error": format!("{}", e)}),
+                            );
                         }
                     }
                 }
@@ -934,9 +1090,21 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
 
             // ─── Knowledge Store Actions ─────────────────────────────
             "store_knowledge" => {
-                let key = req.payload.get("key").and_then(|v| v.as_str()).unwrap_or("");
-                let content = req.payload.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                let tags = req.payload.get("tags").and_then(|v| v.as_str()).unwrap_or("");
+                let key = req
+                    .payload
+                    .get("key")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let content = req
+                    .payload
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let tags = req
+                    .payload
+                    .get("tags")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
                 if key.is_empty() || content.is_empty() {
                     serde_json::json!({ "error": "Missing 'key' or 'content' in payload" })
@@ -946,7 +1114,11 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
             }
 
             "get_knowledge" => {
-                let key = req.payload.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                let key = req
+                    .payload
+                    .get("key")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if key.is_empty() {
                     serde_json::json!({ "error": "Missing 'key' in payload" })
                 } else {
@@ -954,12 +1126,14 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                 }
             }
 
-            "list_knowledge" => {
-                knowledge::list(&pool).await
-            }
+            "list_knowledge" => knowledge::list(&pool).await,
 
             "search_knowledge" => {
-                let query = req.payload.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let query = req
+                    .payload
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if query.is_empty() {
                     serde_json::json!({ "error": "Missing 'query' in payload" })
                 } else {
@@ -968,7 +1142,11 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
             }
 
             "delete_knowledge" => {
-                let key = req.payload.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                let key = req
+                    .payload
+                    .get("key")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if key.is_empty() {
                     serde_json::json!({ "error": "Missing 'key' in payload" })
                 } else {
@@ -976,14 +1154,341 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                 }
             }
 
+            // ─── Memento v3: Research + Semantic Memory ───────────────
+            "upsert_research_project" | "create_research_project" => {
+                match serde_json::from_value::<semantic_memory::ResearchProjectUpsert>(req.payload)
+                {
+                    Ok(payload) => match semantic_memory::upsert_project(&pool, payload).await {
+                        Ok(value) => value,
+                        Err(e) => {
+                            serde_json::json!({ "error": format!("research project upsert error: {}", e) })
+                        }
+                    },
+                    Err(e) => {
+                        serde_json::json!({ "error": format!("Invalid payload for upsert_research_project: {}", e) })
+                    }
+                }
+            }
+            "get_research_project" => {
+                let project_id = req
+                    .payload
+                    .get("project_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if project_id.is_empty() {
+                    serde_json::json!({ "error": "Missing 'project_id' in payload" })
+                } else {
+                    match semantic_memory::get_project(&pool, project_id).await {
+                        Ok(value) => value,
+                        Err(e) => {
+                            serde_json::json!({ "error": format!("research project get error: {}", e) })
+                        }
+                    }
+                }
+            }
+            "list_research_projects" => {
+                let app_id = req.payload.get("app_id").and_then(|v| v.as_str());
+                let tenant_id = req.payload.get("tenant_id").and_then(|v| v.as_str());
+                let status = req.payload.get("status").and_then(|v| v.as_str());
+                let limit = req
+                    .payload
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(25);
+                match semantic_memory::list_projects(&pool, app_id, tenant_id, status, limit).await
+                {
+                    Ok(value) => value,
+                    Err(e) => {
+                        serde_json::json!({ "error": format!("research project list error: {}", e) })
+                    }
+                }
+            }
+            "create_research_session" => {
+                match serde_json::from_value::<semantic_memory::ResearchSessionCreate>(req.payload)
+                {
+                    Ok(payload) => match semantic_memory::create_session(&pool, payload).await {
+                        Ok(value) => value,
+                        Err(e) => {
+                            serde_json::json!({ "error": format!("research session create error: {}", e) })
+                        }
+                    },
+                    Err(e) => {
+                        serde_json::json!({ "error": format!("Invalid payload for create_research_session: {}", e) })
+                    }
+                }
+            }
+            "upsert_research_source" | "create_research_source" => {
+                match serde_json::from_value::<semantic_memory::ResearchSourceUpsert>(req.payload) {
+                    Ok(payload) => match semantic_memory::upsert_source(&pool, payload).await {
+                        Ok(value) => value,
+                        Err(e) => {
+                            serde_json::json!({ "error": format!("research source upsert error: {}", e) })
+                        }
+                    },
+                    Err(e) => {
+                        serde_json::json!({ "error": format!("Invalid payload for upsert_research_source: {}", e) })
+                    }
+                }
+            }
+            "get_research_source" => {
+                let source_id = req
+                    .payload
+                    .get("source_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if source_id.is_empty() {
+                    serde_json::json!({ "error": "Missing 'source_id' in payload" })
+                } else {
+                    match semantic_memory::get_source(&pool, source_id).await {
+                        Ok(value) => value,
+                        Err(e) => {
+                            serde_json::json!({ "error": format!("research source get error: {}", e) })
+                        }
+                    }
+                }
+            }
+            "list_research_sources" => {
+                let project_id = req.payload.get("project_id").and_then(|v| v.as_str());
+                let session_id = req.payload.get("session_id").and_then(|v| v.as_str());
+                let source_kind = req.payload.get("source_kind").and_then(|v| v.as_str());
+                let limit = req
+                    .payload
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(25);
+                match semantic_memory::list_sources(
+                    &pool,
+                    project_id,
+                    session_id,
+                    source_kind,
+                    limit,
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(e) => {
+                        serde_json::json!({ "error": format!("research source list error: {}", e) })
+                    }
+                }
+            }
+            "upsert_concept_node" => {
+                match serde_json::from_value::<semantic_memory::ConceptNodeUpsert>(req.payload) {
+                    Ok(payload) => match semantic_memory::upsert_concept(&pool, payload).await {
+                        Ok(value) => value,
+                        Err(e) => {
+                            serde_json::json!({ "error": format!("concept upsert error: {}", e) })
+                        }
+                    },
+                    Err(e) => {
+                        serde_json::json!({ "error": format!("Invalid payload for upsert_concept_node: {}", e) })
+                    }
+                }
+            }
+            "list_concept_nodes" => {
+                let app_id = req.payload.get("app_id").and_then(|v| v.as_str());
+                let tenant_id = req.payload.get("tenant_id").and_then(|v| v.as_str());
+                let status = req.payload.get("status").and_then(|v| v.as_str());
+                let domain = req.payload.get("domain").and_then(|v| v.as_str());
+                let search = req.payload.get("search").and_then(|v| v.as_str());
+                let limit = req
+                    .payload
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(25);
+                match semantic_memory::list_concepts(
+                    &pool, app_id, tenant_id, status, domain, search, limit,
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(e) => serde_json::json!({ "error": format!("concept list error: {}", e) }),
+                }
+            }
+            "append_claim_record" => {
+                match serde_json::from_value::<semantic_memory::ClaimRecordCreate>(req.payload) {
+                    Ok(payload) => match semantic_memory::append_claim(&pool, payload).await {
+                        Ok(value) => value,
+                        Err(e) => {
+                            serde_json::json!({ "error": format!("claim append error: {}", e) })
+                        }
+                    },
+                    Err(e) => {
+                        serde_json::json!({ "error": format!("Invalid payload for append_claim_record: {}", e) })
+                    }
+                }
+            }
+            "list_claim_records" => {
+                let project_id = req.payload.get("project_id").and_then(|v| v.as_str());
+                let concept_id = req.payload.get("concept_id").and_then(|v| v.as_str());
+                let status = req.payload.get("status").and_then(|v| v.as_str());
+                let search = req.payload.get("search").and_then(|v| v.as_str());
+                let limit = req
+                    .payload
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(25);
+                match semantic_memory::list_claims(
+                    &pool, project_id, concept_id, status, search, limit,
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(e) => serde_json::json!({ "error": format!("claim list error: {}", e) }),
+                }
+            }
+            "append_evidence_record" => {
+                match serde_json::from_value::<semantic_memory::EvidenceRecordCreate>(req.payload) {
+                    Ok(payload) => match semantic_memory::append_evidence(&pool, payload).await {
+                        Ok(value) => value,
+                        Err(e) => {
+                            serde_json::json!({ "error": format!("evidence append error: {}", e) })
+                        }
+                    },
+                    Err(e) => {
+                        serde_json::json!({ "error": format!("Invalid payload for append_evidence_record: {}", e) })
+                    }
+                }
+            }
+            "list_evidence_records" => {
+                let project_id = req.payload.get("project_id").and_then(|v| v.as_str());
+                let claim_id = req.payload.get("claim_id").and_then(|v| v.as_str());
+                let session_id = req.payload.get("session_id").and_then(|v| v.as_str());
+                let source_ref = req.payload.get("source_ref").and_then(|v| v.as_str());
+                let limit = req
+                    .payload
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(25);
+                match semantic_memory::list_evidence(
+                    &pool, project_id, claim_id, session_id, source_ref, limit,
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(e) => serde_json::json!({ "error": format!("evidence list error: {}", e) }),
+                }
+            }
+            "link_concepts" => {
+                match serde_json::from_value::<semantic_memory::RelationEdgeCreate>(req.payload) {
+                    Ok(payload) => match semantic_memory::link_concepts(&pool, payload).await {
+                        Ok(value) => value,
+                        Err(e) => {
+                            serde_json::json!({ "error": format!("relation create error: {}", e) })
+                        }
+                    },
+                    Err(e) => {
+                        serde_json::json!({ "error": format!("Invalid payload for link_concepts: {}", e) })
+                    }
+                }
+            }
+            "list_relation_edges" => {
+                let concept_id = req.payload.get("concept_id").and_then(|v| v.as_str());
+                let relation_type = req.payload.get("relation_type").and_then(|v| v.as_str());
+                let limit = req
+                    .payload
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(25);
+                match semantic_memory::list_relations(&pool, concept_id, relation_type, limit).await
+                {
+                    Ok(value) => value,
+                    Err(e) => serde_json::json!({ "error": format!("relation list error: {}", e) }),
+                }
+            }
+            "expand_concept" => {
+                let concept_id = req
+                    .payload
+                    .get("concept_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let limit = req
+                    .payload
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(20);
+                if concept_id.is_empty() {
+                    serde_json::json!({ "error": "Missing 'concept_id' in payload" })
+                } else {
+                    match semantic_memory::expand_concept(&pool, concept_id, limit).await {
+                        Ok(value) => value,
+                        Err(e) => {
+                            serde_json::json!({ "error": format!("expand concept error: {}", e) })
+                        }
+                    }
+                }
+            }
+            "trace_claim_provenance" => {
+                let claim_id = req
+                    .payload
+                    .get("claim_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if claim_id.is_empty() {
+                    serde_json::json!({ "error": "Missing 'claim_id' in payload" })
+                } else {
+                    match semantic_memory::trace_claim_provenance(&pool, claim_id).await {
+                        Ok(value) => value,
+                        Err(e) => {
+                            serde_json::json!({ "error": format!("trace claim provenance error: {}", e) })
+                        }
+                    }
+                }
+            }
+            "semantic_memory_counts" => match semantic_memory::counts(&pool).await {
+                Ok(value) => serde_json::json!({
+                    "status": "success",
+                    "counts": value
+                }),
+                Err(e) => {
+                    serde_json::json!({ "error": format!("semantic memory counts error: {}", e) })
+                }
+            },
+            "semantic_retention_candidates" => {
+                let limit = req
+                    .payload
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(20);
+                match semantic_memory::retention_candidates(&pool, limit).await {
+                    Ok(value) => value,
+                    Err(e) => {
+                        serde_json::json!({ "error": format!("semantic retention candidates error: {}", e) })
+                    }
+                }
+            }
+
             // ─── Bayesian Interaction Tracking ────────────────────────
             "log_interaction" => {
-                let session_id = req.payload.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
-                let user_id = req.payload.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
-                let domain = req.payload.get("domain").and_then(|v| v.as_str()).unwrap_or("");
-                let round = req.payload.get("round").and_then(|v| v.as_i64()).unwrap_or(0);
-                let options_json = req.payload.get("options_json").and_then(|v| v.as_str()).unwrap_or("[]");
-                let choice_index = req.payload.get("choice_index").and_then(|v| v.as_i64()).unwrap_or(0);
+                let session_id = req
+                    .payload
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let user_id = req
+                    .payload
+                    .get("user_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let domain = req
+                    .payload
+                    .get("domain")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let round = req
+                    .payload
+                    .get("round")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let options_json = req
+                    .payload
+                    .get("options_json")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("[]");
+                let choice_index = req
+                    .payload
+                    .get("choice_index")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
                 let prior_json = req.payload.get("prior_json").and_then(|v| v.as_str());
                 let posterior_json = req.payload.get("posterior_json").and_then(|v| v.as_str());
 
@@ -1012,8 +1517,16 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
             }
 
             "get_user_prior" => {
-                let user_id = req.payload.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
-                let domain = req.payload.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+                let user_id = req
+                    .payload
+                    .get("user_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let domain = req
+                    .payload
+                    .get("domain")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
                 if user_id.is_empty() || domain.is_empty() {
                     serde_json::json!({ "error": "Missing user_id or domain" })
@@ -1049,9 +1562,21 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
             }
 
             "save_user_prior" => {
-                let user_id = req.payload.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
-                let domain = req.payload.get("domain").and_then(|v| v.as_str()).unwrap_or("");
-                let prior_json = req.payload.get("prior_json").and_then(|v| v.as_str()).unwrap_or("");
+                let user_id = req
+                    .payload
+                    .get("user_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let domain = req
+                    .payload
+                    .get("domain")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let prior_json = req
+                    .payload
+                    .get("prior_json")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
                 if user_id.is_empty() || domain.is_empty() || prior_json.is_empty() {
                     serde_json::json!({ "error": "Missing user_id, domain, or prior_json" })
@@ -1063,7 +1588,7 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                         ON CONFLICT(user_id, domain) DO UPDATE SET
                             prior_json = excluded.prior_json,
                             updated_at = CURRENT_TIMESTAMP
-                        "#
+                        "#,
                     )
                     .bind(user_id)
                     .bind(domain)
@@ -1085,21 +1610,76 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
 
             // ─── Virtual Office: Scoped Memory ────────────────────────
             "save_scoped_memory" | "save_memory_record" => {
-                let user_id = req.payload.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
-                let tenant_id = req.payload.get("tenant_id").and_then(|v| v.as_str()).unwrap_or("default");
-                let app_id = req.payload.get("app_id").and_then(|v| v.as_str()).unwrap_or("os");
-                let expert_id = req.payload.get("expert_id").and_then(|v| v.as_str()).unwrap_or("ava");
-                let session_id = req.payload.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
-                let device_id = req.payload.get("device_id").and_then(|v| v.as_str()).unwrap_or("server");
-                let scope = req.payload.get("scope").and_then(|v| v.as_str()).unwrap_or("personal");
-                let source = req.payload.get("source").and_then(|v| v.as_str()).unwrap_or("chat");
-                let memory_type = req.payload.get("memory_type").and_then(|v| v.as_str()).unwrap_or("event");
-                let content = req.payload.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                let content_json = req.payload.get("content_json").filter(|v| !v.is_null()).cloned();
+                let user_id = req
+                    .payload
+                    .get("user_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let tenant_id = req
+                    .payload
+                    .get("tenant_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("default");
+                let app_id = req
+                    .payload
+                    .get("app_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("os");
+                let expert_id = req
+                    .payload
+                    .get("expert_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("ava");
+                let session_id = req
+                    .payload
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let device_id = req
+                    .payload
+                    .get("device_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("server");
+                let scope = req
+                    .payload
+                    .get("scope")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("personal");
+                let source = req
+                    .payload
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("chat");
+                let memory_type = req
+                    .payload
+                    .get("memory_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("event");
+                let content = req
+                    .payload
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let content_json = req
+                    .payload
+                    .get("content_json")
+                    .filter(|v| !v.is_null())
+                    .cloned();
                 let confidence = req.payload.get("confidence").and_then(|v| v.as_f64());
-                let provenance_refs = req.payload.get("provenance_refs").filter(|v| !v.is_null()).cloned();
-                let derivation_method = req.payload.get("derivation_method").and_then(|v| v.as_str());
-                let status = req.payload.get("status").and_then(|v| v.as_str()).unwrap_or("active");
+                let provenance_refs = req
+                    .payload
+                    .get("provenance_refs")
+                    .filter(|v| !v.is_null())
+                    .cloned();
+                let derivation_method = req
+                    .payload
+                    .get("derivation_method")
+                    .and_then(|v| v.as_str());
+                let status = req
+                    .payload
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("active");
                 let expires_at = req.payload.get("expires_at").and_then(|v| v.as_str());
 
                 if user_id.is_empty() || content.is_empty() {
@@ -1150,7 +1730,11 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                 let scope = req.payload.get("scope").and_then(|v| v.as_str());
                 let memory_type = req.payload.get("memory_type").and_then(|v| v.as_str());
                 let status = req.payload.get("status").and_then(|v| v.as_str());
-                let limit = req.payload.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
+                let limit = req
+                    .payload
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(50);
 
                 // Reject global reads — at least one meaningful filter required
                 if user_id.is_none()
@@ -1249,17 +1833,34 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
 
             // ─── Virtual Office: Audit Log ─────────────────────────────
             "audit_log" => {
-                let actor = req.payload.get("actor").and_then(|v| v.as_str()).unwrap_or("");
-                let expert_identity = req.payload.get("expert_identity").and_then(|v| v.as_str()).unwrap_or("");
-                let capability_used = req.payload.get("capability_used").and_then(|v| v.as_str()).unwrap_or("");
+                let actor = req
+                    .payload
+                    .get("actor")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let expert_identity = req
+                    .payload
+                    .get("expert_identity")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let capability_used = req
+                    .payload
+                    .get("capability_used")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let sensitive_action = req.payload.get("sensitive_action").and_then(|v| v.as_str());
                 let target_app = req.payload.get("target_app").and_then(|v| v.as_str());
                 let target_page = req.payload.get("target_page").and_then(|v| v.as_str());
-                let mutation_description = req.payload.get("mutation_description").and_then(|v| v.as_str()).unwrap_or("");
+                let mutation_description = req
+                    .payload
+                    .get("mutation_description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let tenant_id = req.payload.get("tenant_id").and_then(|v| v.as_str());
                 let session_id = req.payload.get("session_id").and_then(|v| v.as_str());
 
-                if actor.is_empty() || expert_identity.is_empty() || mutation_description.is_empty() {
+                if actor.is_empty() || expert_identity.is_empty() || mutation_description.is_empty()
+                {
                     serde_json::json!({ "error": "Missing required fields: actor, expert_identity, mutation_description" })
                 } else {
                     let result = sqlx::query(
@@ -1291,20 +1892,30 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                 match serde_json::from_value::<document_index::DocumentIndexUpsert>(req.payload) {
                     Ok(payload) => match document_index::upsert(&pool, payload).await {
                         Ok(value) => value,
-                        Err(e) => serde_json::json!({ "error": format!("document index upsert error: {}", e) }),
+                        Err(e) => {
+                            serde_json::json!({ "error": format!("document index upsert error: {}", e) })
+                        }
                     },
-                    Err(e) => serde_json::json!({ "error": format!("Invalid payload for upsert_document_index: {}", e) }),
+                    Err(e) => {
+                        serde_json::json!({ "error": format!("Invalid payload for upsert_document_index: {}", e) })
+                    }
                 }
             }
             "get_document_index" => {
-                let document_id = req.payload.get("document_id").and_then(|v| v.as_str()).unwrap_or("");
+                let document_id = req
+                    .payload
+                    .get("document_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let app_id = req.payload.get("app_id").and_then(|v| v.as_str());
                 if document_id.is_empty() {
                     serde_json::json!({ "error": "Missing 'document_id' in payload" })
                 } else {
                     match document_index::get(&pool, document_id, app_id).await {
                         Ok(value) => value,
-                        Err(e) => serde_json::json!({ "error": format!("document index get error: {}", e) }),
+                        Err(e) => {
+                            serde_json::json!({ "error": format!("document index get error: {}", e) })
+                        }
                     }
                 }
             }
@@ -1312,28 +1923,56 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                 let app_id = req.payload.get("app_id").and_then(|v| v.as_str());
                 let tenant_id = req.payload.get("tenant_id").and_then(|v| v.as_str());
                 let index_type = req.payload.get("index_type").and_then(|v| v.as_str());
-                let limit = req.payload.get("limit").and_then(|v| v.as_i64()).unwrap_or(20);
+                let limit = req
+                    .payload
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(20);
                 match document_index::list(&pool, app_id, tenant_id, index_type, limit).await {
                     Ok(value) => value,
-                    Err(e) => serde_json::json!({ "error": format!("document index list error: {}", e) }),
+                    Err(e) => {
+                        serde_json::json!({ "error": format!("document index list error: {}", e) })
+                    }
                 }
             }
             "query_document_index" => {
-                let query_text = req.payload.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let query_text = req
+                    .payload
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let app_id = req.payload.get("app_id").and_then(|v| v.as_str());
                 let tenant_id = req.payload.get("tenant_id").and_then(|v| v.as_str());
                 let document_id = req.payload.get("document_id").and_then(|v| v.as_str());
-                let limit = req.payload.get("limit").and_then(|v| v.as_i64()).unwrap_or(8);
-                match document_index::query(&pool, query_text, app_id, tenant_id, document_id, limit).await {
+                let limit = req
+                    .payload
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(8);
+                match document_index::query(
+                    &pool,
+                    query_text,
+                    app_id,
+                    tenant_id,
+                    document_id,
+                    limit,
+                )
+                .await
+                {
                     Ok(value) => value,
-                    Err(e) => serde_json::json!({ "error": format!("document index query error: {}", e) }),
+                    Err(e) => {
+                        serde_json::json!({ "error": format!("document index query error: {}", e) })
+                    }
                 }
             }
 
             // ─── Paulo Bio Data Actions ───────────────────────────────
             "query_bio" => {
-                let section = req.payload.get("section")
-                    .and_then(|v| v.as_str()).unwrap_or("experience");
+                let section = req
+                    .payload
+                    .get("section")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("experience");
 
                 match section {
                     "experience" => {
@@ -1345,16 +1984,19 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
 
                         match rows {
                             Ok(rows) => {
-                                let items: Vec<serde_json::Value> = rows.iter().map(|row| {
-                                    serde_json::json!({
-                                        "id": row.get::<String, _>("slug"),
-                                        "title": row.get::<String, _>("title"),
-                                        "company": row.get::<String, _>("company"),
-                                        "duration": row.get::<String, _>("duration"),
-                                        "tag": row.get::<String, _>("tag"),
-                                        "summary": row.get::<String, _>("summary"),
+                                let items: Vec<serde_json::Value> = rows
+                                    .iter()
+                                    .map(|row| {
+                                        serde_json::json!({
+                                            "id": row.get::<String, _>("slug"),
+                                            "title": row.get::<String, _>("title"),
+                                            "company": row.get::<String, _>("company"),
+                                            "duration": row.get::<String, _>("duration"),
+                                            "tag": row.get::<String, _>("tag"),
+                                            "summary": row.get::<String, _>("summary"),
+                                        })
                                     })
-                                }).collect();
+                                    .collect();
                                 serde_json::json!({ "status": "success", "section": section, "count": items.len(), "items": items })
                             }
                             Err(e) => serde_json::json!({ "error": format!("DB error: {}", e) }),
@@ -1393,13 +2035,16 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
 
                         match rows {
                             Ok(rows) => {
-                                let items: Vec<serde_json::Value> = rows.iter().map(|row| {
-                                    serde_json::json!({
-                                        "category": row.get::<String, _>("category"),
-                                        "name": row.get::<String, _>("name"),
-                                        "level": row.get::<String, _>("level"),
+                                let items: Vec<serde_json::Value> = rows
+                                    .iter()
+                                    .map(|row| {
+                                        serde_json::json!({
+                                            "category": row.get::<String, _>("category"),
+                                            "name": row.get::<String, _>("name"),
+                                            "level": row.get::<String, _>("level"),
+                                        })
                                     })
-                                }).collect();
+                                    .collect();
                                 serde_json::json!({ "status": "success", "section": section, "count": items.len(), "items": items })
                             }
                             Err(e) => serde_json::json!({ "error": format!("DB error: {}", e) }),
@@ -1410,10 +2055,12 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
             }
 
             "seed_bio" => {
-                let section = req.payload.get("section")
-                    .and_then(|v| v.as_str()).unwrap_or("");
-                let items = req.payload.get("items")
-                    .and_then(|v| v.as_array());
+                let section = req
+                    .payload
+                    .get("section")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let items = req.payload.get("items").and_then(|v| v.as_array());
 
                 if section.is_empty() || items.is_none() {
                     serde_json::json!({ "error": "Missing 'section' or 'items' in payload" })
@@ -1426,12 +2073,17 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                         let result = match section {
                             "experience" => {
                                 let slug = item.get("slug").and_then(|v| v.as_str()).unwrap_or("");
-                                let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
-                                let company = item.get("company").and_then(|v| v.as_str()).unwrap_or("");
-                                let duration = item.get("duration").and_then(|v| v.as_str()).unwrap_or("");
+                                let title =
+                                    item.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                                let company =
+                                    item.get("company").and_then(|v| v.as_str()).unwrap_or("");
+                                let duration =
+                                    item.get("duration").and_then(|v| v.as_str()).unwrap_or("");
                                 let tag = item.get("tag").and_then(|v| v.as_str()).unwrap_or("");
-                                let summary = item.get("summary").and_then(|v| v.as_str()).unwrap_or("");
-                                let sort_order = item.get("sort_order").and_then(|v| v.as_i64()).unwrap_or(0);
+                                let summary =
+                                    item.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+                                let sort_order =
+                                    item.get("sort_order").and_then(|v| v.as_i64()).unwrap_or(0);
 
                                 sqlx::query(
                                     "INSERT OR REPLACE INTO paulo_bio_experience (slug, title, company, duration, tag, summary, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)"
@@ -1442,12 +2094,19 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                             }
                             "education" => {
                                 let slug = item.get("slug").and_then(|v| v.as_str()).unwrap_or("");
-                                let degree = item.get("degree").and_then(|v| v.as_str()).unwrap_or("");
-                                let institution = item.get("institution").and_then(|v| v.as_str()).unwrap_or("");
-                                let duration = item.get("duration").and_then(|v| v.as_str()).unwrap_or("");
+                                let degree =
+                                    item.get("degree").and_then(|v| v.as_str()).unwrap_or("");
+                                let institution = item
+                                    .get("institution")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let duration =
+                                    item.get("duration").and_then(|v| v.as_str()).unwrap_or("");
                                 let tag = item.get("tag").and_then(|v| v.as_str()).unwrap_or("");
-                                let summary = item.get("summary").and_then(|v| v.as_str()).unwrap_or("");
-                                let sort_order = item.get("sort_order").and_then(|v| v.as_i64()).unwrap_or(0);
+                                let summary =
+                                    item.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+                                let sort_order =
+                                    item.get("sort_order").and_then(|v| v.as_i64()).unwrap_or(0);
 
                                 sqlx::query(
                                     "INSERT OR REPLACE INTO paulo_bio_education (slug, degree, institution, duration, tag, summary, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)"
@@ -1457,9 +2116,13 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                                 .await
                             }
                             "skills" => {
-                                let category = item.get("category").and_then(|v| v.as_str()).unwrap_or("");
+                                let category =
+                                    item.get("category").and_then(|v| v.as_str()).unwrap_or("");
                                 let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                                let level = item.get("level").and_then(|v| v.as_str()).unwrap_or("expert");
+                                let level = item
+                                    .get("level")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("expert");
 
                                 sqlx::query(
                                     "INSERT INTO paulo_bio_skills (category, name, level) VALUES (?, ?, ?)"
@@ -1489,10 +2152,16 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
             }
 
             "delete_bio" => {
-                let section = req.payload.get("section")
-                    .and_then(|v| v.as_str()).unwrap_or("");
-                let slug = req.payload.get("slug")
-                    .and_then(|v| v.as_str()).unwrap_or("");
+                let section = req
+                    .payload
+                    .get("section")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let slug = req
+                    .payload
+                    .get("slug")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
                 if section.is_empty() || slug.is_empty() {
                     serde_json::json!({ "error": "Missing 'section' or 'slug' in payload" })
@@ -1500,16 +2169,22 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                     let result = match section {
                         "experience" => {
                             sqlx::query("DELETE FROM paulo_bio_experience WHERE slug = ?")
-                                .bind(slug).execute(&pool).await
+                                .bind(slug)
+                                .execute(&pool)
+                                .await
                         }
                         "education" => {
                             sqlx::query("DELETE FROM paulo_bio_education WHERE slug = ?")
-                                .bind(slug).execute(&pool).await
+                                .bind(slug)
+                                .execute(&pool)
+                                .await
                         }
                         "skills" => {
                             // For skills, slug is the id
                             sqlx::query("DELETE FROM paulo_bio_skills WHERE id = ?")
-                                .bind(slug.parse::<i64>().unwrap_or(0)).execute(&pool).await
+                                .bind(slug.parse::<i64>().unwrap_or(0))
+                                .execute(&pool)
+                                .await
                         }
                         _ => {
                             return Ok(());
@@ -1527,7 +2202,11 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
             }
 
             "vector_search" => {
-                let query = req.payload.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let query = req
+                    .payload
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
                 if query.is_empty() {
                     serde_json::json!({ "error": "Missing 'query' in payload" })
@@ -1550,6 +2229,6 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
             error!("Failed to send IPC response: {}", e);
         }
     }
-    
+
     Ok(())
 }

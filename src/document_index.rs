@@ -84,7 +84,10 @@ fn score_node(node: &DocumentIndexNode, query_tokens: &HashSet<String>) -> (f64,
         0.0
     };
 
-    ((overlap_score * 0.7) + (level_bonus * 0.1) + title_bonus, overlap)
+    (
+        (overlap_score * 0.7) + (level_bonus * 0.1) + title_bonus,
+        overlap,
+    )
 }
 
 pub async fn init_tables(pool: &SqlitePool) -> anyhow::Result<()> {
@@ -142,7 +145,10 @@ pub async fn init_tables(pool: &SqlitePool) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn upsert(pool: &SqlitePool, payload: DocumentIndexUpsert) -> anyhow::Result<serde_json::Value> {
+pub async fn upsert(
+    pool: &SqlitePool,
+    payload: DocumentIndexUpsert,
+) -> anyhow::Result<serde_json::Value> {
     if payload.record.document_id.trim().is_empty() {
         anyhow::bail!("document_id is required");
     }
@@ -185,7 +191,13 @@ pub async fn upsert(pool: &SqlitePool, payload: DocumentIndexUpsert) -> anyhow::
     .bind(&payload.record.index_type)
     .bind(&payload.record.source_type)
     .bind(&payload.record.source_uri)
-    .bind(payload.record.metadata_json.as_ref().map(|value| value.to_string()))
+    .bind(
+        payload
+            .record
+            .metadata_json
+            .as_ref()
+            .map(|value| value.to_string()),
+    )
     .bind(&payload.record.root_node_id)
     .bind(&payload.record.status)
     .execute(&mut *tx)
@@ -218,7 +230,11 @@ pub async fn upsert(pool: &SqlitePool, payload: DocumentIndexUpsert) -> anyhow::
         .bind(node.end_offset)
         .bind(node.page_from)
         .bind(node.page_to)
-        .bind(node.tags.as_ref().map(|value| serde_json::to_string(value).unwrap_or_default()))
+        .bind(
+            node.tags
+                .as_ref()
+                .map(|value| serde_json::to_string(value).unwrap_or_default()),
+        )
         .bind(node.metadata_json.as_ref().map(|value| value.to_string()))
         .execute(&mut *tx)
         .await?;
@@ -383,10 +399,14 @@ pub async fn query(
 ) -> anyhow::Result<serde_json::Value> {
     let query_tokens = tokenize(query_text);
     if query_tokens.is_empty() {
-        return Ok(serde_json::json!({ "error": "query must contain at least one alphanumeric token with length >= 3" }));
+        return Ok(
+            serde_json::json!({ "error": "query must contain at least one alphanumeric token with length >= 3" }),
+        );
     }
     if app_id.is_none() && tenant_id.is_none() && document_id.is_none() {
-        return Ok(serde_json::json!({ "error": "At least one filter (document_id, app_id, tenant_id) is required. Global document reads are forbidden." }));
+        return Ok(
+            serde_json::json!({ "error": "At least one filter (document_id, app_id, tenant_id) is required. Global document reads are forbidden." }),
+        );
     }
 
     let mut sql = String::from(
@@ -467,9 +487,17 @@ pub async fn query(
     }
 
     results.sort_by(|a, b| {
-        let left = a.get("score").and_then(|value| value.as_f64()).unwrap_or(0.0);
-        let right = b.get("score").and_then(|value| value.as_f64()).unwrap_or(0.0);
-        right.partial_cmp(&left).unwrap_or(std::cmp::Ordering::Equal)
+        let left = a
+            .get("score")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(0.0);
+        let right = b
+            .get("score")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(0.0);
+        right
+            .partial_cmp(&left)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
     results.truncate(limit.max(1).min(25) as usize);
 
@@ -530,7 +558,9 @@ mod tests {
                     node_id: "approval".to_string(),
                     parent_node_id: Some("root".to_string()),
                     title: "Approval Workflow".to_string(),
-                    summary: Some("Manager approval is required before remote work begins.".to_string()),
+                    summary: Some(
+                        "Manager approval is required before remote work begins.".to_string(),
+                    ),
                     level: 1,
                     node_type: "section".to_string(),
                     source_ref: Some("page:4".to_string()),
