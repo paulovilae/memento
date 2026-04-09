@@ -3,7 +3,7 @@
 /// Inspired by ContextKeep's memory model but implemented natively in Rust
 /// with SQLite storage and UDS IPC transport.
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::SqlitePool;
+use sqlx::PgPool;
 use sqlx::Row;
 use tracing::{info, error};
 
@@ -27,15 +27,15 @@ pub struct KnowledgeIndex {
 }
 
 /// Creates the `knowledge_store` table if it doesn't exist.
-pub async fn init_knowledge_table(pool: &SqlitePool) -> anyhow::Result<()> {
+pub async fn init_knowledge_table(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS knowledge_store (
             key TEXT PRIMARY KEY,
             content TEXT NOT NULL,
             tags TEXT DEFAULT '',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         "#,
     )
@@ -49,7 +49,7 @@ pub async fn init_knowledge_table(pool: &SqlitePool) -> anyhow::Result<()> {
 /// Upserts a knowledge entry. If the key already exists, content and tags
 /// are updated and `updated_at` is refreshed.
 pub async fn store(
-    pool: &SqlitePool,
+    pool: &sqlx::PgPool,
     key: &str,
     content: &str,
     tags: &str,
@@ -57,7 +57,7 @@ pub async fn store(
     let result = sqlx::query(
         r#"
         INSERT INTO knowledge_store (key, content, tags, updated_at)
-        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
         ON CONFLICT(key) DO UPDATE SET
             content = excluded.content,
             tags = excluded.tags,
@@ -87,9 +87,8 @@ pub async fn store(
 }
 
 /// Retrieves a single knowledge entry by exact key.
-pub async fn get(pool: &SqlitePool, key: &str) -> serde_json::Value {
-    let result = sqlx::query(
-        "SELECT key, content, tags, created_at, updated_at FROM knowledge_store WHERE key = ?",
+pub async fn get(pool: &sqlx::PgPool, key: &str) -> serde_json::Value {
+    let result = sqlx::query("SELECT key, content, tags, created_at, updated_at FROM knowledge_store WHERE key = $1",
     )
     .bind(key)
     .fetch_optional(pool)
@@ -125,9 +124,8 @@ pub async fn get(pool: &SqlitePool, key: &str) -> serde_json::Value {
 
 /// Returns a compact index of all knowledge entries (key, title, tags, char_count, updated_at).
 /// Title is derived from the first 80 characters of content.
-pub async fn list(pool: &SqlitePool) -> serde_json::Value {
-    let result = sqlx::query(
-        "SELECT key, content, tags, updated_at FROM knowledge_store ORDER BY updated_at DESC",
+pub async fn list(pool: &sqlx::PgPool) -> serde_json::Value {
+    let result = sqlx::query("SELECT key, content, tags, updated_at FROM knowledge_store ORDER BY updated_at DESC",
     )
     .fetch_all(pool)
     .await;
@@ -175,7 +173,7 @@ pub async fn list(pool: &SqlitePool) -> serde_json::Value {
 
 /// Searches knowledge entries by keyword across key, content, and tags.
 /// Uses SQLite LIKE for broad matching.
-pub async fn search(pool: &SqlitePool, query: &str) -> serde_json::Value {
+pub async fn search(pool: &sqlx::PgPool, query: &str) -> serde_json::Value {
     let tokens: Vec<String> = query
         .replace(&['\'', '"', ',', '.', '!', '?'][..], "")
         .split_whitespace()
@@ -200,17 +198,15 @@ pub async fn search(pool: &SqlitePool, query: &str) -> serde_json::Value {
         // Build SQL string placeholders dynamically 
         // e.g., (key LIKE ? OR content LIKE ? OR tags LIKE ?)
         let bind_idx = i + 1;
-        ks_conditions.push(format!("(key LIKE ?{} OR content LIKE ?{} OR tags LIKE ?{})", bind_idx, bind_idx, bind_idx));
-        bio_conditions.push(format!("(title LIKE ?{} OR company LIKE ?{} OR tag LIKE ?{} OR summary LIKE ?{})", bind_idx, bind_idx, bind_idx, bind_idx));
+        ks_conditions.push(format!("(key LIKE $1{} OR content LIKE $2{} OR tags LIKE $3{})", bind_idx, bind_idx, bind_idx));
+        bio_conditions.push(format!("(title LIKE $1{} OR company LIKE $2{} OR tag LIKE $3{} OR summary LIKE $4{})", bind_idx, bind_idx, bind_idx, bind_idx));
     }
 
-    let ks_final_sql = format!(
-        "SELECT key, content, tags, updated_at FROM knowledge_store WHERE {} ORDER BY updated_at DESC LIMIT 25",
+    let ks_final_sql = format!("SELECT key, content, tags, updated_at FROM knowledge_store WHERE {} ORDER BY updated_at DESC LIMIT 25",
         ks_conditions.join(" OR ")
     );
 
-    let bio_final_sql = format!(
-        "SELECT slug, title, company, duration, tag, summary FROM paulo_bio_experience WHERE {} LIMIT 25",
+    let bio_final_sql = format!("SELECT slug, title, company, duration, tag, summary FROM paulo_bio_experience WHERE {} LIMIT 25",
         bio_conditions.join(" OR ")
     );
 
@@ -290,8 +286,8 @@ pub async fn search(pool: &SqlitePool, query: &str) -> serde_json::Value {
 }
 
 /// Deletes a knowledge entry by exact key.
-pub async fn delete(pool: &SqlitePool, key: &str) -> serde_json::Value {
-    let result = sqlx::query("DELETE FROM knowledge_store WHERE key = ?")
+pub async fn delete(pool: &sqlx::PgPool, key: &str) -> serde_json::Value {
+    let result = sqlx::query("DELETE FROM knowledge_store WHERE key = $1")
         .bind(key)
         .execute(pool)
         .await;

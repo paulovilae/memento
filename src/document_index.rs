@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, PgPool};
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,11 +87,11 @@ fn score_node(node: &DocumentIndexNode, query_tokens: &HashSet<String>) -> (f64,
     ((overlap_score * 0.7) + (level_bonus * 0.1) + title_bonus, overlap)
 }
 
-pub async fn init_tables(pool: &SqlitePool) -> anyhow::Result<()> {
+pub async fn init_tables(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS document_indexes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             document_id TEXT NOT NULL UNIQUE,
             tenant_id TEXT NOT NULL DEFAULT 'default',
             app_id TEXT NOT NULL DEFAULT 'os',
@@ -104,8 +104,8 @@ pub async fn init_tables(pool: &SqlitePool) -> anyhow::Result<()> {
             metadata_json TEXT,
             root_node_id TEXT,
             status TEXT NOT NULL DEFAULT 'active',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         "#,
     )
@@ -115,7 +115,7 @@ pub async fn init_tables(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS document_index_nodes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             document_id TEXT NOT NULL,
             node_id TEXT NOT NULL,
             parent_node_id TEXT,
@@ -130,8 +130,8 @@ pub async fn init_tables(pool: &SqlitePool) -> anyhow::Result<()> {
             page_to INTEGER,
             tags_json TEXT,
             metadata_json TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(document_id, node_id)
         )
         "#,
@@ -142,7 +142,7 @@ pub async fn init_tables(pool: &SqlitePool) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn upsert(pool: &SqlitePool, payload: DocumentIndexUpsert) -> anyhow::Result<serde_json::Value> {
+pub async fn upsert(pool: &sqlx::PgPool, payload: DocumentIndexUpsert) -> anyhow::Result<serde_json::Value> {
     if payload.record.document_id.trim().is_empty() {
         anyhow::bail!("document_id is required");
     }
@@ -191,7 +191,7 @@ pub async fn upsert(pool: &SqlitePool, payload: DocumentIndexUpsert) -> anyhow::
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query("DELETE FROM document_index_nodes WHERE document_id = ?")
+    sqlx::query("DELETE FROM document_index_nodes WHERE document_id = $1")
         .bind(&payload.record.document_id)
         .execute(&mut *tx)
         .await?;
@@ -235,7 +235,7 @@ pub async fn upsert(pool: &SqlitePool, payload: DocumentIndexUpsert) -> anyhow::
 }
 
 pub async fn get(
-    pool: &SqlitePool,
+    pool: &sqlx::PgPool,
     document_id: &str,
     app_id: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
@@ -309,7 +309,7 @@ pub async fn get(
 }
 
 pub async fn list(
-    pool: &SqlitePool,
+    pool: &sqlx::PgPool,
     app_id: Option<&str>,
     tenant_id: Option<&str>,
     index_type: Option<&str>,
@@ -374,7 +374,7 @@ pub async fn list(
 }
 
 pub async fn query(
-    pool: &SqlitePool,
+    pool: &sqlx::PgPool,
     query_text: &str,
     app_id: Option<&str>,
     tenant_id: Option<&str>,
@@ -483,11 +483,11 @@ pub async fn query(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::sqlite::SqlitePoolOptions;
+    use sqlx::postgres::PgPoolOptions;
 
     #[tokio::test]
     async fn page_tree_index_roundtrip_works() {
-        let pool = SqlitePoolOptions::new()
+        let pool = sqlx::PgPoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await

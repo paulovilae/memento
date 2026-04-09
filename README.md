@@ -5,6 +5,28 @@
 **Transport:** Unix Domain Socket (`/tmp/memento.sock`) — Zero HTTP overhead  
 **MCP Bridge:** Stdio transport via `memento-mcp` binary  
 
+## Bundle Position
+
+`Memento` is not the full Ava assistant by itself.
+
+It is one component inside the canonical Ava bundle:
+
+- `Argus`
+- `Sentinel`
+- `Imaginclaw`
+- `Hera/hera-core`
+- `Hera/diakonos-core`
+- `Memento`
+
+Before diagnosing assistant capability or adding features, read:
+
+- [Ava Bundle Capabilities Matrix](/home/paulo/Programs/apps/OS/docs/AVA_BUNDLE_CAPABILITIES_MATRIX.md)
+
+Mandatory rule:
+
+- Do not treat missing orchestration, approvals, scheduling, or channel behavior as missing `Memento` capability without checking the full bundle first.
+- Do not duplicate assistant control-plane logic in `Memento` when the correct owner is `Imaginclaw`, `Sentinel`, or `Argus`.
+
 ---
 
 ## Architecture

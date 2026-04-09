@@ -7,7 +7,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, error, Level};
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use sqlx::postgres::{PgPoolOptions};
 use sqlx::{Column, Row};
 
 mod hardware;
@@ -71,15 +71,15 @@ fn clamp_f64(value: f64, min: f64, max: f64) -> f64 {
     value.max(min).min(max)
 }
 
-async fn ensure_sqlite_column(
-    pool: &SqlitePool,
+async fn ensure_pg_column(
+    pool: &sqlx::PgPool,
     table: &str,
     column: &str,
     column_definition: &str,
 ) -> anyhow::Result<()> {
-    let pragma = format!("PRAGMA table_info({table})");
-    let rows = sqlx::query(&pragma).fetch_all(pool).await?;
-    let exists = rows.iter().any(|row| row.get::<String, _>("name") == column);
+    let query = format!("SELECT column_name FROM information_schema.columns WHERE table_name='{}' AND column_name='{}'", table, column);
+    let rows = sqlx::query(&query).fetch_all(pool).await?;
+    let exists = !rows.is_empty();
     if !exists {
         let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {column_definition}");
         sqlx::query(&sql).execute(pool).await?;
@@ -145,14 +145,14 @@ fn score_memory_message(
     }
 }
 
-async fn load_memory_profile(pool: &SqlitePool, chat_id: &str) -> anyhow::Result<AdaptiveMemoryProfile> {
+async fn load_memory_profile(pool: &sqlx::PgPool, chat_id: &str) -> anyhow::Result<AdaptiveMemoryProfile> {
     let default_profile = default_memory_profile();
     let row = sqlx::query(
         r#"
         SELECT recent_limit, candidate_limit, max_message_chars, max_total_chars,
                recency_weight, overlap_weight, assistant_weight
         FROM adaptive_memory_profiles
-        WHERE chat_id = ?
+        WHERE chat_id = $1
         "#,
     )
     .bind(chat_id)
@@ -161,13 +161,13 @@ async fn load_memory_profile(pool: &SqlitePool, chat_id: &str) -> anyhow::Result
 
     if let Some(row) = row {
         Ok(AdaptiveMemoryProfile {
-            recent_limit: clamp_i64(row.get::<i64, _>("recent_limit"), 2, 8),
-            candidate_limit: clamp_i64(row.get::<i64, _>("candidate_limit"), 8, 32),
-            max_message_chars: clamp_i64(row.get::<i64, _>("max_message_chars"), 300, 1600),
-            max_total_chars: clamp_i64(row.get::<i64, _>("max_total_chars"), 1200, 5000),
-            recency_weight: clamp_f64(row.get::<f64, _>("recency_weight"), 0.1, 0.8),
-            overlap_weight: clamp_f64(row.get::<f64, _>("overlap_weight"), 0.1, 0.8),
-            assistant_weight: clamp_f64(row.get::<f64, _>("assistant_weight"), 0.0, 0.3),
+            recent_limit: clamp_i64(row.get::<i32, _>("recent_limit") as i64, 2, 8),
+            candidate_limit: clamp_i64(row.get::<i32, _>("candidate_limit") as i64, 8, 32),
+            max_message_chars: clamp_i64(row.get::<i32, _>("max_message_chars") as i64, 300, 1600),
+            max_total_chars: clamp_i64(row.get::<i32, _>("max_total_chars") as i64, 1200, 5000),
+            recency_weight: clamp_f64(row.get::<f32, _>("recency_weight") as f64, 0.1, 0.8),
+            overlap_weight: clamp_f64(row.get::<f32, _>("overlap_weight") as f64, 0.1, 0.8),
+            assistant_weight: clamp_f64(row.get::<f32, _>("assistant_weight") as f64, 0.0, 0.3),
         })
     } else {
         sqlx::query(
@@ -175,30 +175,30 @@ async fn load_memory_profile(pool: &SqlitePool, chat_id: &str) -> anyhow::Result
             INSERT INTO adaptive_memory_profiles (
                 chat_id, recent_limit, candidate_limit, max_message_chars, max_total_chars,
                 recency_weight, overlap_weight, assistant_weight
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             "#,
         )
         .bind(chat_id)
-        .bind(default_profile.recent_limit)
-        .bind(default_profile.candidate_limit)
-        .bind(default_profile.max_message_chars)
-        .bind(default_profile.max_total_chars)
-        .bind(default_profile.recency_weight)
-        .bind(default_profile.overlap_weight)
-        .bind(default_profile.assistant_weight)
+        .bind(default_profile.recent_limit as i32)
+        .bind(default_profile.candidate_limit as i32)
+        .bind(default_profile.max_message_chars as i32)
+        .bind(default_profile.max_total_chars as i32)
+        .bind(default_profile.recency_weight as f32)
+        .bind(default_profile.overlap_weight as f32)
+        .bind(default_profile.assistant_weight as f32)
         .execute(pool)
         .await?;
         Ok(default_profile)
     }
 }
 
-async fn store_memory_profile(pool: &SqlitePool, chat_id: &str, profile: &AdaptiveMemoryProfile) -> anyhow::Result<()> {
+async fn store_memory_profile(pool: &sqlx::PgPool, chat_id: &str, profile: &AdaptiveMemoryProfile) -> anyhow::Result<()> {
     sqlx::query(
         r#"
         INSERT INTO adaptive_memory_profiles (
             chat_id, recent_limit, candidate_limit, max_message_chars, max_total_chars,
             recency_weight, overlap_weight, assistant_weight, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP)
         ON CONFLICT(chat_id) DO UPDATE SET
             recent_limit = excluded.recent_limit,
             candidate_limit = excluded.candidate_limit,
@@ -211,13 +211,13 @@ async fn store_memory_profile(pool: &SqlitePool, chat_id: &str, profile: &Adapti
         "#,
     )
     .bind(chat_id)
-    .bind(profile.recent_limit)
-    .bind(profile.candidate_limit)
-    .bind(profile.max_message_chars)
-    .bind(profile.max_total_chars)
-    .bind(profile.recency_weight)
-    .bind(profile.overlap_weight)
-    .bind(profile.assistant_weight)
+    .bind(profile.recent_limit as i32)
+    .bind(profile.candidate_limit as i32)
+    .bind(profile.max_message_chars as i32)
+    .bind(profile.max_total_chars as i32)
+    .bind(profile.recency_weight as f32)
+    .bind(profile.overlap_weight as f32)
+    .bind(profile.assistant_weight as f32)
     .execute(pool)
     .await?;
 
@@ -225,7 +225,7 @@ async fn store_memory_profile(pool: &SqlitePool, chat_id: &str, profile: &Adapti
 }
 
 async fn record_feedback(
-    pool: &SqlitePool,
+    pool: &sqlx::PgPool,
     chat_id: &str,
     signal: &str,
     observed_chars: Option<i64>,
@@ -234,7 +234,7 @@ async fn record_feedback(
     sqlx::query(
         r#"
         INSERT INTO adaptive_memory_feedback (chat_id, signal, observed_chars, query)
-        VALUES (?, ?, ?, ?)
+        VALUES ($1, $2, $3, $4)
         "#,
     )
     .bind(chat_id)
@@ -270,25 +270,25 @@ async fn record_feedback(
     Ok(profile)
 }
 
-async fn init_db() -> anyhow::Result<SqlitePool> {
+async fn init_db() -> anyhow::Result<sqlx::PgPool> {
     let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
     path.push("memento");
     std::fs::create_dir_all(&path).unwrap_or_default();
     path.push("memory.db");
     
-    let db_url = format!("sqlite://{}?mode=rwc", path.to_string_lossy());
-    let pool = SqlitePoolOptions::new()
+    let db_url = "postgresql://imaginos:imaginos_secure_2026@localhost:5432/os_core_db".to_string();
+    let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
         .connect(&db_url).await?;
 
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS memento_memory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             chat_id TEXT NOT NULL,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         "#
     )
@@ -306,7 +306,7 @@ async fn init_db() -> anyhow::Result<SqlitePool> {
             recency_weight REAL NOT NULL DEFAULT 0.35,
             overlap_weight REAL NOT NULL DEFAULT 0.55,
             assistant_weight REAL NOT NULL DEFAULT 0.10,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         "#,
     )
@@ -316,12 +316,12 @@ async fn init_db() -> anyhow::Result<SqlitePool> {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS adaptive_memory_feedback (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             chat_id TEXT NOT NULL,
             signal TEXT NOT NULL,
             observed_chars INTEGER,
             query TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         "#,
     )
@@ -332,7 +332,7 @@ async fn init_db() -> anyhow::Result<SqlitePool> {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS bayesian_interactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             session_id TEXT NOT NULL,
             user_id TEXT NOT NULL,
             domain TEXT NOT NULL,
@@ -341,7 +341,7 @@ async fn init_db() -> anyhow::Result<SqlitePool> {
             choice_index INTEGER NOT NULL,
             prior_json TEXT,
             posterior_json TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         "#
     )
@@ -354,7 +354,7 @@ async fn init_db() -> anyhow::Result<SqlitePool> {
             user_id TEXT NOT NULL,
             domain TEXT NOT NULL,
             prior_json TEXT NOT NULL,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, domain)
         )
         "#
@@ -366,7 +366,7 @@ async fn init_db() -> anyhow::Result<SqlitePool> {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS scoped_memory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             user_id TEXT NOT NULL,
             tenant_id TEXT NOT NULL DEFAULT 'default',
             app_id TEXT NOT NULL DEFAULT 'os',
@@ -376,26 +376,26 @@ async fn init_db() -> anyhow::Result<SqlitePool> {
             scope TEXT NOT NULL DEFAULT 'personal',
             source TEXT NOT NULL DEFAULT 'chat',
             content TEXT NOT NULL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         "#
     )
     .execute(&pool)
     .await?;
 
-    ensure_sqlite_column(&pool, "scoped_memory", "memory_type", "TEXT NOT NULL DEFAULT 'event'").await?;
-    ensure_sqlite_column(&pool, "scoped_memory", "content_json", "TEXT").await?;
-    ensure_sqlite_column(&pool, "scoped_memory", "confidence", "REAL").await?;
-    ensure_sqlite_column(&pool, "scoped_memory", "provenance_refs", "TEXT").await?;
-    ensure_sqlite_column(&pool, "scoped_memory", "derivation_method", "TEXT").await?;
-    ensure_sqlite_column(&pool, "scoped_memory", "status", "TEXT NOT NULL DEFAULT 'active'").await?;
-    ensure_sqlite_column(&pool, "scoped_memory", "expires_at", "DATETIME").await?;
+    ensure_pg_column(&pool, "scoped_memory", "memory_type", "TEXT NOT NULL DEFAULT 'event'").await?;
+    ensure_pg_column(&pool, "scoped_memory", "content_json", "TEXT").await?;
+    ensure_pg_column(&pool, "scoped_memory", "confidence", "REAL").await?;
+    ensure_pg_column(&pool, "scoped_memory", "provenance_refs", "TEXT").await?;
+    ensure_pg_column(&pool, "scoped_memory", "derivation_method", "TEXT").await?;
+    ensure_pg_column(&pool, "scoped_memory", "status", "TEXT NOT NULL DEFAULT 'active'").await?;
+    ensure_pg_column(&pool, "scoped_memory", "expires_at", "TIMESTAMP").await?;
 
     // ─── Virtual Office: Audit Log ───────────────────────────────
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS audit_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             actor TEXT NOT NULL,
             expert_identity TEXT NOT NULL,
             capability_used TEXT NOT NULL,
@@ -405,7 +405,7 @@ async fn init_db() -> anyhow::Result<SqlitePool> {
             mutation_description TEXT NOT NULL,
             tenant_id TEXT,
             session_id TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         "#
     )
@@ -413,52 +413,49 @@ async fn init_db() -> anyhow::Result<SqlitePool> {
     .await?;
 
     // ─── Paulo Bio Data Tables ────────────────────────────────
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS paulo_bio_experience (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            slug TEXT UNIQUE NOT NULL,
-            title TEXT NOT NULL,
-            company TEXT NOT NULL,
-            duration TEXT NOT NULL,
-            tag TEXT NOT NULL,
-            summary TEXT NOT NULL,
-            sort_order INTEGER DEFAULT 0
-        )
-        "#
-    )
-    .execute(&pool)
-    .await?;
+    let langs = ["", "_es", "_fr", "_it"];
+    for ext in langs.iter() {
+        sqlx::query(&format!(
+            "CREATE TABLE IF NOT EXISTS paulo_bio_experience{} (
+                id SERIAL PRIMARY KEY,
+                slug TEXT UNIQUE NOT NULL,
+                title TEXT NOT NULL,
+                company TEXT NOT NULL,
+                duration TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                sort_order INTEGER DEFAULT 0
+            )", ext
+        ))
+        .execute(&pool)
+        .await?;
 
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS paulo_bio_education (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            slug TEXT UNIQUE NOT NULL,
-            degree TEXT NOT NULL,
-            institution TEXT NOT NULL,
-            duration TEXT NOT NULL,
-            tag TEXT NOT NULL,
-            summary TEXT,
-            sort_order INTEGER DEFAULT 0
-        )
-        "#
-    )
-    .execute(&pool)
-    .await?;
+        sqlx::query(&format!(
+            "CREATE TABLE IF NOT EXISTS paulo_bio_education{} (
+                id SERIAL PRIMARY KEY,
+                slug TEXT UNIQUE NOT NULL,
+                degree TEXT NOT NULL,
+                institution TEXT NOT NULL,
+                duration TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                summary TEXT,
+                sort_order INTEGER DEFAULT 0
+            )", ext
+        ))
+        .execute(&pool)
+        .await?;
 
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS paulo_bio_skills (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            category TEXT NOT NULL,
-            name TEXT NOT NULL,
-            level TEXT DEFAULT 'expert'
-        )
-        "#
-    )
-    .execute(&pool)
-    .await?;
+        sqlx::query(&format!(
+            "CREATE TABLE IF NOT EXISTS paulo_bio_skills{} (
+                id SERIAL PRIMARY KEY,
+                category TEXT NOT NULL,
+                name TEXT NOT NULL,
+                level TEXT DEFAULT 'expert'
+            )", ext
+        ))
+        .execute(&pool)
+        .await?;
+    }
 
     document_index::init_tables(&pool).await?;
 
@@ -526,7 +523,7 @@ async fn main() -> anyhow::Result<()> {
 
 type AppConnections = Arc<HashMap<String, app_registry::AppConnection>>;
 
-async fn handle_uds_connections(listener: UnixListener, pool: SqlitePool, apps: AppConnections) {
+async fn handle_uds_connections(listener: UnixListener, pool: sqlx::PgPool, apps: AppConnections) {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
@@ -543,7 +540,7 @@ async fn handle_uds_connections(listener: UnixListener, pool: SqlitePool, apps: 
     }
 }
 
-async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppConnections) -> anyhow::Result<()> {
+async fn process_uds_stream(mut stream: UnixStream, pool: sqlx::PgPool, apps: AppConnections) -> anyhow::Result<()> {
     let mut buffer = vec![0; 8192 * 4];
     loop {
         let n = stream.read(&mut buffer).await?;
@@ -565,8 +562,7 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
         let response = match req.action.as_str() {
             "save_memory" => {
                 if let Ok(entry) = serde_json::from_value::<MemoryEntry>(req.payload) {
-                    let result = sqlx::query(
-                        "INSERT INTO memento_memory (chat_id, role, content) VALUES (?, ?, ?)"
+                    let result = sqlx::query("INSERT INTO memento_memory (chat_id, role, content) VALUES ($1, $2, $3)"
                     )
                     .bind(&entry.chat_id)
                     .bind(&entry.role)
@@ -591,8 +587,7 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                     Ok(profile) => {
                         let effective_limit = clamp_i64(limit_hint.min(profile.recent_limit), 2, 8);
                         let candidate_limit = clamp_i64(profile.candidate_limit.max(effective_limit * 2), 8, 32);
-                        let rows_result = sqlx::query(
-                            "SELECT role, content FROM memento_memory WHERE chat_id = ? ORDER BY timestamp DESC LIMIT ?"
+                        let rows_result = sqlx::query("SELECT role, content FROM memento_memory WHERE chat_id = $1 ORDER BY timestamp DESC LIMIT $2"
                         )
                         .bind(chat_id)
                         .bind(candidate_limit)
@@ -620,30 +615,10 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
 
                                 scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
-                                let mut picked = Vec::new();
-                                if query_tokens.is_empty() {
-                                    picked = scored
-                                        .into_iter()
-                                        .take(effective_limit as usize)
-                                        .collect::<Vec<_>>();
-                                } else {
-                                    for message in scored.iter().filter(|message| message.overlap_score > 0.0) {
-                                        if picked.len() >= effective_limit as usize {
-                                            break;
-                                        }
-                                        picked.push(message.clone());
-                                    }
-
-                                    for message in scored.iter().filter(|message| message.recency_score >= 0.75) {
-                                        if picked.len() >= effective_limit as usize {
-                                            break;
-                                        }
-                                        if picked.iter().any(|existing| existing.role == message.role && existing.content == message.content) {
-                                            continue;
-                                        }
-                                        picked.push(message.clone());
-                                    }
-                                }
+                                let mut picked = scored
+                                    .into_iter()
+                                    .take(effective_limit as usize)
+                                    .collect::<Vec<_>>();
 
                                 picked.sort_by(|a, b| a.recency_score.partial_cmp(&b.recency_score).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -750,7 +725,7 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                 if chat_id.is_empty() {
                     serde_json::json!({ "error": "Missing 'chat_id' in payload" })
                 } else {
-                    let result = sqlx::query("DELETE FROM memento_memory WHERE chat_id = ?")
+                    let result = sqlx::query("DELETE FROM memento_memory WHERE chat_id = $1")
                         .bind(chat_id)
                         .execute(&pool)
                         .await;
@@ -760,6 +735,7 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                     }
                 }
             }
+
 
             // ─── App Registry Actions ──────────────────────────────────
             "list_apps" => {
@@ -808,7 +784,7 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                                     let mut obj = serde_json::Map::new();
                                     for col in columns {
                                         let name = col.name();
-                                        // Try JSON first, then string, then numerics, then bool
+                                        // Try JSON first, then string, then numerics, then datetime, then bool
                                         if let Ok(v) = row.try_get::<serde_json::Value, _>(name) {
                                             obj.insert(name.to_string(), v);
                                         } else if let Ok(v) = row.try_get::<String, _>(name) {
@@ -823,6 +799,10 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                                             obj.insert(name.to_string(), serde_json::json!(v));
                                         } else if let Ok(v) = row.try_get::<bool, _>(name) {
                                             obj.insert(name.to_string(), serde_json::json!(v));
+                                        } else if let Ok(v) = row.try_get::<chrono::DateTime<chrono::Utc>, _>(name) {
+                                            obj.insert(name.to_string(), serde_json::json!(v.to_rfc3339()));
+                                        } else if let Ok(v) = row.try_get::<chrono::NaiveDateTime, _>(name) {
+                                            obj.insert(name.to_string(), serde_json::json!(v.to_string()));
                                         } else {
                                             obj.insert(name.to_string(), serde_json::Value::Null);
                                         }
@@ -990,8 +970,7 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                 if session_id.is_empty() || user_id.is_empty() || domain.is_empty() {
                     serde_json::json!({ "error": "Missing session_id, user_id, or domain" })
                 } else {
-                    let result = sqlx::query(
-                        "INSERT INTO bayesian_interactions (session_id, user_id, domain, round, options_json, choice_index, prior_json, posterior_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                    let result = sqlx::query("INSERT INTO bayesian_interactions (session_id, user_id, domain, round, options_json, choice_index, prior_json, posterior_json) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
                     )
                     .bind(session_id)
                     .bind(user_id)
@@ -1018,8 +997,7 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                 if user_id.is_empty() || domain.is_empty() {
                     serde_json::json!({ "error": "Missing user_id or domain" })
                 } else {
-                    let result = sqlx::query(
-                        "SELECT prior_json, updated_at FROM user_priors WHERE user_id = ? AND domain = ?"
+                    let result = sqlx::query("SELECT prior_json, updated_at FROM user_priors WHERE user_id = $1 AND domain = $2"
                     )
                     .bind(user_id)
                     .bind(domain)
@@ -1059,7 +1037,7 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                     let result = sqlx::query(
                         r#"
                         INSERT INTO user_priors (user_id, domain, prior_json, updated_at)
-                        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                        VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
                         ON CONFLICT(user_id, domain) DO UPDATE SET
                             prior_json = excluded.prior_json,
                             updated_at = CURRENT_TIMESTAMP
@@ -1105,8 +1083,7 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                 if user_id.is_empty() || content.is_empty() {
                     serde_json::json!({ "error": "Missing 'user_id' or 'content' in payload" })
                 } else {
-                    let result = sqlx::query(
-                        "INSERT INTO scoped_memory (user_id, tenant_id, app_id, expert_id, session_id, device_id, scope, source, memory_type, content, content_json, confidence, provenance_refs, derivation_method, status, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    let result = sqlx::query("INSERT INTO scoped_memory (user_id, tenant_id, app_id, expert_id, session_id, device_id, scope, source, memory_type, content, content_json, confidence, provenance_refs, derivation_method, status, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)"
                     )
                     .bind(user_id)
                     .bind(tenant_id)
@@ -1164,45 +1141,53 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                     serde_json::json!({ "error": "At least one filter (user_id, tenant_id, app_id, expert_id, session_id, scope, memory_type) is required. Global reads are forbidden." })
                 } else {
                     // Build dynamic WHERE clause
-                    let mut conditions = Vec::new();
+                    let mut conditions: Vec<String> = Vec::new();
                     let mut bind_values: Vec<String> = Vec::new();
+                    let mut param_idx = 1;
 
                     if let Some(v) = user_id {
-                        conditions.push("user_id = ?");
+                        conditions.push(format!("user_id = ${}", param_idx));
+                        param_idx += 1;
                         bind_values.push(v.to_string());
                     }
                     if let Some(v) = tenant_id {
-                        conditions.push("tenant_id = ?");
+                        conditions.push(format!("tenant_id = ${}", param_idx));
+                        param_idx += 1;
                         bind_values.push(v.to_string());
                     }
                     if let Some(v) = app_id {
-                        conditions.push("app_id = ?");
+                        conditions.push(format!("app_id = ${}", param_idx));
+                        param_idx += 1;
                         bind_values.push(v.to_string());
                     }
                     if let Some(v) = expert_id {
-                        conditions.push("expert_id = ?");
+                        conditions.push(format!("expert_id = ${}", param_idx));
+                        param_idx += 1;
                         bind_values.push(v.to_string());
                     }
                     if let Some(v) = session_id {
-                        conditions.push("session_id = ?");
+                        conditions.push(format!("session_id = ${}", param_idx));
+                        param_idx += 1;
                         bind_values.push(v.to_string());
                     }
                     if let Some(v) = scope {
-                        conditions.push("scope = ?");
+                        conditions.push(format!("scope = ${}", param_idx));
+                        param_idx += 1;
                         bind_values.push(v.to_string());
                     }
                     if let Some(v) = memory_type {
-                        conditions.push("memory_type = ?");
+                        conditions.push(format!("memory_type = ${}", param_idx));
+                        param_idx += 1;
                         bind_values.push(v.to_string());
                     }
                     if let Some(v) = status {
-                        conditions.push("status = ?");
+                        conditions.push(format!("status = ${}", param_idx));
+                        param_idx += 1;
                         bind_values.push(v.to_string());
                     }
 
                     let where_clause = conditions.join(" AND ");
-                    let sql = format!(
-                        "SELECT user_id, tenant_id, app_id, expert_id, session_id, device_id, scope, source, memory_type, content, content_json, confidence, provenance_refs, derivation_method, status, expires_at, timestamp FROM scoped_memory WHERE {} ORDER BY timestamp DESC LIMIT {}",
+                    let sql = format!("SELECT user_id, tenant_id, app_id, expert_id, session_id, device_id, scope, source, memory_type, content, content_json, confidence, provenance_refs, derivation_method, status, expires_at, timestamp FROM scoped_memory WHERE {} ORDER BY timestamp DESC LIMIT {}",
                         where_clause, limit
                     );
 
@@ -1262,8 +1247,7 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                 if actor.is_empty() || expert_identity.is_empty() || mutation_description.is_empty() {
                     serde_json::json!({ "error": "Missing required fields: actor, expert_identity, mutation_description" })
                 } else {
-                    let result = sqlx::query(
-                        "INSERT INTO audit_log (actor, expert_identity, capability_used, sensitive_action, target_app, target_page, mutation_description, tenant_id, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    let result = sqlx::query("INSERT INTO audit_log (actor, expert_identity, capability_used, sensitive_action, target_app, target_page, mutation_description, tenant_id, session_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
                     )
                     .bind(actor)
                     .bind(expert_identity)
@@ -1335,77 +1319,81 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                 let section = req.payload.get("section")
                     .and_then(|v| v.as_str()).unwrap_or("experience");
 
-                match section {
-                    "experience" => {
-                        let rows = sqlx::query(
-                            "SELECT slug, title, company, duration, tag, summary, sort_order FROM paulo_bio_experience ORDER BY sort_order"
-                        )
-                        .fetch_all(&pool)
-                        .await;
+                let mut base_section = "";
+                if section.starts_with("experience") {
+                    base_section = "experience";
+                } else if section.starts_with("education") {
+                    base_section = "education";
+                } else if section.starts_with("skills") {
+                    base_section = "skills";
+                }
 
-                        match rows {
-                            Ok(rows) => {
-                                let items: Vec<serde_json::Value> = rows.iter().map(|row| {
-                                    serde_json::json!({
-                                        "id": row.get::<String, _>("slug"),
-                                        "title": row.get::<String, _>("title"),
-                                        "company": row.get::<String, _>("company"),
-                                        "duration": row.get::<String, _>("duration"),
-                                        "tag": row.get::<String, _>("tag"),
-                                        "summary": row.get::<String, _>("summary"),
-                                    })
-                                }).collect();
-                                serde_json::json!({ "status": "success", "section": section, "count": items.len(), "items": items })
-                            }
-                            Err(e) => serde_json::json!({ "error": format!("DB error: {}", e) }),
-                        }
-                    }
-                    "education" => {
-                        let rows = sqlx::query(
-                            "SELECT slug, degree, institution, duration, tag, summary, sort_order FROM paulo_bio_education ORDER BY sort_order"
-                        )
-                        .fetch_all(&pool)
-                        .await;
+                if base_section == "" {
+                    serde_json::json!({ "error": format!("Unknown section: {}", section) })
+                } else {
+                    match base_section {
+                        "experience" => {
+                            let query = format!("SELECT slug, title, company, duration, tag, summary, sort_order FROM paulo_bio_{} ORDER BY sort_order", section);
+                            let rows = sqlx::query(&query).fetch_all(&pool).await;
 
-                        match rows {
-                            Ok(rows) => {
-                                let items: Vec<serde_json::Value> = rows.iter().map(|row| {
-                                    serde_json::json!({
-                                        "id": row.get::<String, _>("slug"),
-                                        "title": row.get::<String, _>("degree"),
-                                        "company": row.get::<String, _>("institution"),
-                                        "duration": row.get::<String, _>("duration"),
-                                        "tag": row.get::<String, _>("tag"),
-                                        "summary": row.get::<Option<String>, _>("summary").unwrap_or_default(),
-                                    })
-                                }).collect();
-                                serde_json::json!({ "status": "success", "section": section, "count": items.len(), "items": items })
+                            match rows {
+                                Ok(rows) => {
+                                    let items: Vec<serde_json::Value> = rows.iter().map(|row| {
+                                        serde_json::json!({
+                                            "id": row.get::<String, _>("slug"),
+                                            "title": row.get::<String, _>("title"),
+                                            "company": row.get::<String, _>("company"),
+                                            "duration": row.get::<String, _>("duration"),
+                                            "tag": row.get::<String, _>("tag"),
+                                            "summary": row.get::<String, _>("summary"),
+                                        })
+                                    }).collect();
+                                    serde_json::json!({ "status": "success", "section": section, "count": items.len(), "items": items })
+                                }
+                                Err(e) => serde_json::json!({ "error": format!("DB error: {}", e) }),
                             }
-                            Err(e) => serde_json::json!({ "error": format!("DB error: {}", e) }),
                         }
-                    }
-                    "skills" => {
-                        let rows = sqlx::query(
-                            "SELECT category, name, level FROM paulo_bio_skills ORDER BY category, name"
-                        )
-                        .fetch_all(&pool)
-                        .await;
+                        "education" => {
+                            let query = format!("SELECT slug, degree, institution, duration, tag, summary, sort_order FROM paulo_bio_{} ORDER BY sort_order", section);
+                            let rows = sqlx::query(&query).fetch_all(&pool).await;
 
-                        match rows {
-                            Ok(rows) => {
-                                let items: Vec<serde_json::Value> = rows.iter().map(|row| {
-                                    serde_json::json!({
-                                        "category": row.get::<String, _>("category"),
-                                        "name": row.get::<String, _>("name"),
-                                        "level": row.get::<String, _>("level"),
-                                    })
-                                }).collect();
-                                serde_json::json!({ "status": "success", "section": section, "count": items.len(), "items": items })
+                            match rows {
+                                Ok(rows) => {
+                                    let items: Vec<serde_json::Value> = rows.iter().map(|row| {
+                                        serde_json::json!({
+                                            "id": row.get::<String, _>("slug"),
+                                            "title": row.get::<String, _>("degree"),
+                                            "company": row.get::<String, _>("institution"),
+                                            "duration": row.get::<String, _>("duration"),
+                                            "tag": row.get::<String, _>("tag"),
+                                            "summary": row.get::<Option<String>, _>("summary").unwrap_or_default(),
+                                        })
+                                    }).collect();
+                                    serde_json::json!({ "status": "success", "section": section, "count": items.len(), "items": items })
+                                }
+                                Err(e) => serde_json::json!({ "error": format!("DB error: {}", e) }),
                             }
-                            Err(e) => serde_json::json!({ "error": format!("DB error: {}", e) }),
                         }
+                        "skills" => {
+                            let query = format!("SELECT category, name, level FROM paulo_bio_{} ORDER BY category, name", section);
+                            let rows = sqlx::query(&query).fetch_all(&pool).await;
+
+                            match rows {
+                                Ok(rows) => {
+                                    let items: Vec<serde_json::Value> = rows.iter().map(|row| {
+                                        serde_json::json!({
+                                            "category": row.get::<String, _>("category"),
+                                            "name": row.get::<String, _>("name"),
+                                            "level": row.get::<String, _>("level"),
+                                        })
+                                    }).collect();
+                                    serde_json::json!({ "status": "success", "section": section, "count": items.len(), "items": items })
+                                }
+                                Err(e) => serde_json::json!({ "error": format!("DB error: {}", e) }),
+                            }
+                        }
+                        _ => serde_json::json!({ "error": format!("Unknown section: {}", section) }),
                     }
-                    _ => serde_json::json!({ "error": format!("Unknown section: {}", section) }),
                 }
             }
 
@@ -1422,69 +1410,79 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                     let mut inserted = 0usize;
                     let mut errors = Vec::new();
 
-                    for item in items {
-                        let result = match section {
-                            "experience" => {
-                                let slug = item.get("slug").and_then(|v| v.as_str()).unwrap_or("");
-                                let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
-                                let company = item.get("company").and_then(|v| v.as_str()).unwrap_or("");
-                                let duration = item.get("duration").and_then(|v| v.as_str()).unwrap_or("");
-                                let tag = item.get("tag").and_then(|v| v.as_str()).unwrap_or("");
-                                let summary = item.get("summary").and_then(|v| v.as_str()).unwrap_or("");
-                                let sort_order = item.get("sort_order").and_then(|v| v.as_i64()).unwrap_or(0);
-
-                                sqlx::query(
-                                    "INSERT OR REPLACE INTO paulo_bio_experience (slug, title, company, duration, tag, summary, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)"
-                                )
-                                .bind(slug).bind(title).bind(company).bind(duration).bind(tag).bind(summary).bind(sort_order)
-                                .execute(&pool)
-                                .await
-                            }
-                            "education" => {
-                                let slug = item.get("slug").and_then(|v| v.as_str()).unwrap_or("");
-                                let degree = item.get("degree").and_then(|v| v.as_str()).unwrap_or("");
-                                let institution = item.get("institution").and_then(|v| v.as_str()).unwrap_or("");
-                                let duration = item.get("duration").and_then(|v| v.as_str()).unwrap_or("");
-                                let tag = item.get("tag").and_then(|v| v.as_str()).unwrap_or("");
-                                let summary = item.get("summary").and_then(|v| v.as_str()).unwrap_or("");
-                                let sort_order = item.get("sort_order").and_then(|v| v.as_i64()).unwrap_or(0);
-
-                                sqlx::query(
-                                    "INSERT OR REPLACE INTO paulo_bio_education (slug, degree, institution, duration, tag, summary, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)"
-                                )
-                                .bind(slug).bind(degree).bind(institution).bind(duration).bind(tag).bind(summary).bind(sort_order)
-                                .execute(&pool)
-                                .await
-                            }
-                            "skills" => {
-                                let category = item.get("category").and_then(|v| v.as_str()).unwrap_or("");
-                                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                                let level = item.get("level").and_then(|v| v.as_str()).unwrap_or("expert");
-
-                                sqlx::query(
-                                    "INSERT INTO paulo_bio_skills (category, name, level) VALUES (?, ?, ?)"
-                                )
-                                .bind(category).bind(name).bind(level)
-                                .execute(&pool)
-                                .await
-                            }
-                            _ => {
-                                errors.push("Unknown section".to_string());
-                                continue;
-                            }
-                        };
-
-                        match result {
-                            Ok(_) => inserted += 1,
-                            Err(e) => errors.push(format!("{}", e)),
-                        }
+                    let mut base_section = "";
+                    if section.starts_with("experience") {
+                        base_section = "experience";
+                    } else if section.starts_with("education") {
+                        base_section = "education";
+                    } else if section.starts_with("skills") {
+                        base_section = "skills";
                     }
 
-                    serde_json::json!({
-                        "status": "success",
-                        "inserted": inserted,
-                        "errors": errors
-                    })
+                    if base_section == "" {
+                        serde_json::json!({ "error": format!("Unknown section: {}", section) })
+                    } else {
+                        for item in items {
+                            let result = match base_section {
+                                "experience" => {
+                                    let slug = item.get("slug").and_then(|v| v.as_str()).unwrap_or("");
+                                    let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                                    let company = item.get("company").and_then(|v| v.as_str()).unwrap_or("");
+                                    let duration = item.get("duration").and_then(|v| v.as_str()).unwrap_or("");
+                                    let tag = item.get("tag").and_then(|v| v.as_str()).unwrap_or("");
+                                    let summary = item.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+                                    let sort_order = item.get("sort_order").and_then(|v| v.as_i64()).unwrap_or(0);
+
+                                    let query = format!("INSERT INTO paulo_bio_{} (slug, title, company, duration, tag, summary, sort_order) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (slug) DO UPDATE SET title=$2, company=$3, duration=$4, tag=$5, summary=$6, sort_order=$7", section);
+                                    sqlx::query(&query)
+                                    .bind(slug).bind(title).bind(company).bind(duration).bind(tag).bind(summary).bind(sort_order)
+                                    .execute(&pool)
+                                    .await
+                                }
+                                "education" => {
+                                    let slug = item.get("slug").and_then(|v| v.as_str()).unwrap_or("");
+                                    let degree = item.get("degree").and_then(|v| v.as_str()).unwrap_or("");
+                                    let institution = item.get("institution").and_then(|v| v.as_str()).unwrap_or("");
+                                    let duration = item.get("duration").and_then(|v| v.as_str()).unwrap_or("");
+                                    let tag = item.get("tag").and_then(|v| v.as_str()).unwrap_or("");
+                                    let summary = item.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+                                    let sort_order = item.get("sort_order").and_then(|v| v.as_i64()).unwrap_or(0);
+
+                                    let query = format!("INSERT INTO paulo_bio_{} (slug, degree, institution, duration, tag, summary, sort_order) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (slug) DO UPDATE SET degree=$2, institution=$3, duration=$4, tag=$5, summary=$6, sort_order=$7", section);
+                                    sqlx::query(&query)
+                                    .bind(slug).bind(degree).bind(institution).bind(duration).bind(tag).bind(summary).bind(sort_order)
+                                    .execute(&pool)
+                                    .await
+                                }
+                                "skills" => {
+                                    let category = item.get("category").and_then(|v| v.as_str()).unwrap_or("");
+                                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                    let level = item.get("level").and_then(|v| v.as_str()).unwrap_or("expert");
+
+                                    let query = format!("INSERT INTO paulo_bio_{} (category, name, level) VALUES ($1, $2, $3)", section);
+                                    sqlx::query(&query)
+                                    .bind(category).bind(name).bind(level)
+                                    .execute(&pool)
+                                    .await
+                                }
+                                _ => {
+                                    errors.push("Unknown section".to_string());
+                                    continue;
+                                }
+                            };
+
+                            match result {
+                                Ok(_) => inserted += 1,
+                                Err(e) => errors.push(format!("{}", e)),
+                            }
+                        }
+
+                        serde_json::json!({
+                            "status": "success",
+                            "inserted": inserted,
+                            "errors": errors
+                        })
+                    }
                 }
             }
 
@@ -1499,16 +1497,16 @@ async fn process_uds_stream(mut stream: UnixStream, pool: SqlitePool, apps: AppC
                 } else {
                     let result = match section {
                         "experience" => {
-                            sqlx::query("DELETE FROM paulo_bio_experience WHERE slug = ?")
+                            sqlx::query("DELETE FROM paulo_bio_experience WHERE slug = $1")
                                 .bind(slug).execute(&pool).await
                         }
                         "education" => {
-                            sqlx::query("DELETE FROM paulo_bio_education WHERE slug = ?")
+                            sqlx::query("DELETE FROM paulo_bio_education WHERE slug = $1")
                                 .bind(slug).execute(&pool).await
                         }
                         "skills" => {
                             // For skills, slug is the id
-                            sqlx::query("DELETE FROM paulo_bio_skills WHERE id = ?")
+                            sqlx::query("DELETE FROM paulo_bio_skills WHERE id = $1")
                                 .bind(slug.parse::<i64>().unwrap_or(0)).execute(&pool).await
                         }
                         _ => {
