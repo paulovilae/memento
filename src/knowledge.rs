@@ -2,29 +2,8 @@
 ///
 /// Inspired by ContextKeep's memory model but implemented natively in Rust
 /// with SQLite storage and UDS IPC transport.
-use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use sqlx::Row;
-use tracing::{info, error};
-
-/// Represents a knowledge entry stored in the `knowledge_store` table.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KnowledgeEntry {
-    pub key: String,
-    pub content: String,
-    #[serde(default)]
-    pub tags: String,
-}
-
-/// A compact index entry returned by `list()`.
-#[derive(Debug, Serialize)]
-pub struct KnowledgeIndex {
-    pub key: String,
-    pub title: String,
-    pub tags: String,
-    pub char_count: usize,
-    pub updated_at: String,
-}
+use tracing::{error, info};
 
 /// Creates the `knowledge_store` table if it doesn't exist.
 pub async fn init_knowledge_table(pool: &sqlx::PgPool) -> anyhow::Result<()> {
@@ -48,12 +27,7 @@ pub async fn init_knowledge_table(pool: &sqlx::PgPool) -> anyhow::Result<()> {
 
 /// Upserts a knowledge entry. If the key already exists, content and tags
 /// are updated and `updated_at` is refreshed.
-pub async fn store(
-    pool: &sqlx::PgPool,
-    key: &str,
-    content: &str,
-    tags: &str,
-) -> serde_json::Value {
+pub async fn store(pool: &sqlx::PgPool, key: &str, content: &str, tags: &str) -> serde_json::Value {
     let result = sqlx::query(
         r#"
         INSERT INTO knowledge_store (key, content, tags, updated_at)
@@ -88,7 +62,8 @@ pub async fn store(
 
 /// Retrieves a single knowledge entry by exact key.
 pub async fn get(pool: &sqlx::PgPool, key: &str) -> serde_json::Value {
-    let result = sqlx::query("SELECT key, content, tags, created_at, updated_at FROM knowledge_store WHERE key = $1",
+    let result = sqlx::query(
+        "SELECT key, content, tags, created_at, updated_at FROM knowledge_store WHERE key = $1",
     )
     .bind(key)
     .fetch_optional(pool)
@@ -125,7 +100,8 @@ pub async fn get(pool: &sqlx::PgPool, key: &str) -> serde_json::Value {
 /// Returns a compact index of all knowledge entries (key, title, tags, char_count, updated_at).
 /// Title is derived from the first 80 characters of content.
 pub async fn list(pool: &sqlx::PgPool) -> serde_json::Value {
-    let result = sqlx::query("SELECT key, content, tags, updated_at FROM knowledge_store ORDER BY updated_at DESC",
+    let result = sqlx::query(
+        "SELECT key, content, tags, updated_at FROM knowledge_store ORDER BY updated_at DESC",
     )
     .fetch_all(pool)
     .await;
@@ -188,18 +164,21 @@ pub async fn search(pool: &sqlx::PgPool, query: &str) -> serde_json::Value {
         tokens
     };
 
-    let mut ks_query = String::from("SELECT key, content, tags, updated_at FROM knowledge_store WHERE ");
-    let mut bio_query = String::from("SELECT slug, title, company, duration, tag, summary FROM paulo_bio_experience WHERE ");
-    
     let mut ks_conditions = Vec::new();
     let mut bio_conditions = Vec::new();
-    
+
     for (i, _) in search_tokens.iter().enumerate() {
-        // Build SQL string placeholders dynamically 
+        // Build SQL string placeholders dynamically
         // e.g., (key LIKE ? OR content LIKE ? OR tags LIKE ?)
         let bind_idx = i + 1;
-        ks_conditions.push(format!("(key LIKE $1{} OR content LIKE $2{} OR tags LIKE $3{})", bind_idx, bind_idx, bind_idx));
-        bio_conditions.push(format!("(title LIKE $1{} OR company LIKE $2{} OR tag LIKE $3{} OR summary LIKE $4{})", bind_idx, bind_idx, bind_idx, bind_idx));
+        ks_conditions.push(format!(
+            "(key LIKE $1{} OR content LIKE $2{} OR tags LIKE $3{})",
+            bind_idx, bind_idx, bind_idx
+        ));
+        bio_conditions.push(format!(
+            "(title LIKE $1{} OR company LIKE $2{} OR tag LIKE $3{} OR summary LIKE $4{})",
+            bind_idx, bind_idx, bind_idx, bind_idx
+        ));
     }
 
     let ks_final_sql = format!("SELECT key, content, tags, updated_at FROM knowledge_store WHERE {} ORDER BY updated_at DESC LIMIT 25",
@@ -230,13 +209,13 @@ pub async fn search(pool: &sqlx::PgPool, query: &str) -> serde_json::Value {
             let content: String = row.get("content");
             let tags: String = row.get("tags");
             let updated_at: String = row.get("updated_at");
-            
+
             let snippet = if content.len() <= 200 {
                 content.clone()
             } else {
                 format!("{}…", &content[..200])
             };
-            
+
             entries.push(serde_json::json!({
                 "key": key,
                 "snippet": snippet,
@@ -256,15 +235,18 @@ pub async fn search(pool: &sqlx::PgPool, query: &str) -> serde_json::Value {
             let duration: String = row.get("duration");
             let tag: String = row.get("tag");
             let summary: String = row.get("summary");
-            
-            let content = format!("Role: {} at {}\nDuration: {}\nTag: {}\nSummary: {}", title, company, duration, tag, summary);
-            
+
+            let content = format!(
+                "Role: {} at {}\nDuration: {}\nTag: {}\nSummary: {}",
+                title, company, duration, tag, summary
+            );
+
             let snippet = if content.len() <= 200 {
                 content.clone()
             } else {
                 format!("{}…", &content[..200])
             };
-            
+
             entries.push(serde_json::json!({
                 "key": format!("bio_experience_{}", slug),
                 "snippet": snippet,
@@ -272,7 +254,7 @@ pub async fn search(pool: &sqlx::PgPool, query: &str) -> serde_json::Value {
                 "char_count": content.len(),
                 "updated_at": "",
                 "source": "paulo_bio_experience",
-                "full_content": content 
+                "full_content": content
             }));
         }
     }

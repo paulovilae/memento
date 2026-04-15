@@ -16,17 +16,28 @@
 ///   }
 /// }
 use rmcp::{
-    ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
     schemars, tool, tool_handler, tool_router,
     transport::stdio,
+    ServerHandler, ServiceExt,
 };
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 const MEMENTO_SOCKET: &str = "/tmp/memento.sock";
+
+fn request_envelope(action: &str, payload: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "action": action,
+        "payload": payload,
+        "client": {
+            "app": "memento-mcp",
+            "token": std::env::var("MEMENTO_CLIENT_TOKEN").ok()
+        }
+    })
+}
 
 // ─── MCP Tool Parameter Schemas ─────────────────────────────────────────
 
@@ -39,7 +50,9 @@ struct StoreMemoryParams {
     #[schemars(description = "The full text content of the memory")]
     content: String,
     /// Comma-separated tags for categorization
-    #[schemars(description = "Comma-separated tags for categorization (e.g., 'setup,specs,hardware')")]
+    #[schemars(
+        description = "Comma-separated tags for categorization (e.g., 'setup,specs,hardware')"
+    )]
     #[serde(default)]
     tags: String,
 }
@@ -69,10 +82,7 @@ struct DeleteMemoryParams {
 
 /// Sends a JSON action to the Memento daemon over UDS and returns the response.
 async fn send_ipc(action: &str, payload: serde_json::Value) -> String {
-    let msg = serde_json::json!({
-        "action": action,
-        "payload": payload
-    });
+    let msg = request_envelope(action, payload);
 
     match UnixStream::connect(MEMENTO_SOCKET).await {
         Ok(mut stream) => {
@@ -115,11 +125,10 @@ impl MementoMcp {
     }
 
     /// Store a memory entry. If the key already exists, it will be updated.
-    #[tool(description = "Store or update a persistent memory entry with a unique key, content, and optional tags. Use this to save important information that should persist across conversations.")]
-    async fn store_memory(
-        &self,
-        Parameters(params): Parameters<StoreMemoryParams>,
-    ) -> String {
+    #[tool(
+        description = "Store or update a persistent memory entry with a unique key, content, and optional tags. Use this to save important information that should persist across conversations."
+    )]
+    async fn store_memory(&self, Parameters(params): Parameters<StoreMemoryParams>) -> String {
         send_ipc(
             "store_knowledge",
             serde_json::json!({
@@ -132,27 +141,29 @@ impl MementoMcp {
     }
 
     /// Retrieve a memory entry by its exact key.
-    #[tool(description = "Retrieve a specific memory entry by its exact key. Use list_all_memories() first to find the correct key.")]
+    #[tool(
+        description = "Retrieve a specific memory entry by its exact key. Use list_all_memories() first to find the correct key."
+    )]
     async fn retrieve_memory(
         &self,
         Parameters(params): Parameters<RetrieveMemoryParams>,
     ) -> String {
-        send_ipc(
-            "get_knowledge",
-            serde_json::json!({ "key": params.key }),
-        )
-        .await
+        send_ipc("get_knowledge", serde_json::json!({ "key": params.key })).await
     }
 
     /// List all stored memories. Returns a compact index with keys, titles,
     /// tags, char counts, and timestamps.
-    #[tool(description = "List all stored memory entries. Returns a compact directory with key, title (first 80 chars), tags, character count, and last updated timestamp for every entry. Use this FIRST to find the exact key before calling retrieve_memory().")]
+    #[tool(
+        description = "List all stored memory entries. Returns a compact directory with key, title (first 80 chars), tags, character count, and last updated timestamp for every entry. Use this FIRST to find the exact key before calling retrieve_memory()."
+    )]
     async fn list_all_memories(&self) -> String {
         send_ipc("list_knowledge", serde_json::json!({})).await
     }
 
     /// Search memories by keyword across keys, content, and tags.
-    #[tool(description = "Search all memories by keyword. Matches against keys, content, and tags. Returns snippets of matching entries. Use this for content-based searches, NOT for key lookup (use list_all_memories for that).")]
+    #[tool(
+        description = "Search all memories by keyword. Matches against keys, content, and tags. Returns snippets of matching entries. Use this for content-based searches, NOT for key lookup (use list_all_memories for that)."
+    )]
     async fn search_memories(
         &self,
         Parameters(params): Parameters<SearchMemoriesParams>,
@@ -165,31 +176,25 @@ impl MementoMcp {
     }
 
     /// Delete a memory entry by its exact key.
-    #[tool(description = "Delete a specific memory entry by its exact key. This action is permanent.")]
-    async fn delete_memory(
-        &self,
-        Parameters(params): Parameters<DeleteMemoryParams>,
-    ) -> String {
-        send_ipc(
-            "delete_knowledge",
-            serde_json::json!({ "key": params.key }),
-        )
-        .await
+    #[tool(
+        description = "Delete a specific memory entry by its exact key. This action is permanent."
+    )]
+    async fn delete_memory(&self, Parameters(params): Parameters<DeleteMemoryParams>) -> String {
+        send_ipc("delete_knowledge", serde_json::json!({ "key": params.key })).await
     }
 }
 
 #[tool_handler]
 impl ServerHandler for MementoMcp {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions(
-                "Memento is the sovereign long-term memory for ImagineOS. \
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+            "Memento is the sovereign long-term memory for ImagineOS. \
                  Use the Memory Index Protocol: \
                  1) Call list_all_memories() to get the complete key directory. \
                  2) Call retrieve_memory(exact_key) to fetch specific content. \
                  Only use search_memories() for content-based searches."
-                    .to_string(),
-            )
+                .to_string(),
+        )
     }
 }
 
@@ -206,12 +211,9 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("🧠 Starting Memento MCP Bridge (Stdio transport)");
 
-    let service = MementoMcp::new()
-        .serve(stdio())
-        .await
-        .inspect_err(|e| {
-            tracing::error!("MCP serving error: {:?}", e);
-        })?;
+    let service = MementoMcp::new().serve(stdio()).await.inspect_err(|e| {
+        tracing::error!("MCP serving error: {:?}", e);
+    })?;
 
     service.waiting().await?;
     Ok(())

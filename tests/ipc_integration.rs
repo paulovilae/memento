@@ -52,7 +52,10 @@ fn test_get_context_default_limit() {
 
     let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
     assert_eq!(msg["action"], "get_context");
-    assert!(msg["payload"]["limit"].is_null(), "Limit should be absent, daemon uses default");
+    assert!(
+        msg["payload"]["limit"].is_null(),
+        "Limit should be absent, daemon uses default"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -72,8 +75,13 @@ fn test_save_memory_record_payload_structure() {
             "device_id": "laptop",
             "scope": "personal",
             "source": "chat",
+            "wing": "vetra",
+            "hall": "contracts",
+            "room": "msa-negotiation",
+            "entry_title": "MSA redlines call",
             "memory_type": "fact",
             "content": "User prefers concise status reports.",
+            "tags": ["preference", "style"],
             "content_json": {
                 "preference": "concise",
                 "topic": "status_reports"
@@ -88,8 +96,10 @@ fn test_save_memory_record_payload_structure() {
     let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
     assert_eq!(msg["action"], "save_memory_record");
     assert_eq!(msg["payload"]["user_id"], "user-123");
+    assert_eq!(msg["payload"]["room"], "msa-negotiation");
     assert_eq!(msg["payload"]["memory_type"], "fact");
     assert_eq!(msg["payload"]["confidence"], 0.91);
+    assert!(msg["payload"]["tags"].is_array());
     assert!(msg["payload"]["content_json"].is_object());
     assert!(msg["payload"]["provenance_refs"].is_array());
 }
@@ -117,6 +127,8 @@ fn test_query_memory_records_payload_structure() {
         "payload": {
             "user_id": "user-123",
             "app_id": "os-v3",
+            "wing": "vetra",
+            "room": "msa-negotiation",
             "memory_type": "fact",
             "status": "active",
             "limit": 25
@@ -126,6 +138,7 @@ fn test_query_memory_records_payload_structure() {
     let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
     assert_eq!(msg["action"], "query_memory_records");
     assert_eq!(msg["payload"]["user_id"], "user-123");
+    assert_eq!(msg["payload"]["wing"], "vetra");
     assert_eq!(msg["payload"]["memory_type"], "fact");
     assert_eq!(msg["payload"]["status"], "active");
     assert_eq!(msg["payload"]["limit"], 25);
@@ -152,13 +165,152 @@ fn test_get_scoped_memory_alias_still_supported() {
         "action": "get_scoped_memory",
         "payload": {
             "user_id": "user-123",
-            "scope": "personal"
+            "scope": "personal",
+            "room": "msa-negotiation"
         }
     });
 
     let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
     assert_eq!(msg["action"], "get_scoped_memory");
     assert_eq!(msg["payload"]["scope"], "personal");
+}
+
+#[test]
+fn test_search_memory_records_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "search_memory_records",
+        "payload": {
+            "user_id": "user-123",
+            "app_id": "vetra",
+            "wing": "vetra",
+            "hall": "contracts",
+            "query": "redlines liability cap",
+            "limit": 10
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "search_memory_records");
+    assert_eq!(msg["payload"]["hall"], "contracts");
+    assert_eq!(msg["payload"]["query"], "redlines liability cap");
+    assert_eq!(msg["payload"]["limit"], 10);
+}
+
+#[test]
+fn test_get_memory_timeline_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "get_memory_timeline",
+        "payload": {
+            "user_id": "user-123",
+            "session_id": "session-456",
+            "room": "msa-negotiation",
+            "limit": 30
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "get_memory_timeline");
+    assert_eq!(msg["payload"]["room"], "msa-negotiation");
+    assert_eq!(msg["payload"]["limit"], 30);
+}
+
+#[test]
+fn test_get_working_context_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "get_working_context",
+        "payload": {
+            "user_id": "user-123",
+            "app_id": "vetra",
+            "session_id": "session-456",
+            "summary_limit": 3,
+            "recent_event_limit": 8
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "get_working_context");
+    assert_eq!(msg["payload"]["session_id"], "session-456");
+    assert_eq!(msg["payload"]["summary_limit"], 3);
+    assert_eq!(msg["payload"]["recent_event_limit"], 8);
+}
+
+#[test]
+fn test_get_preferences_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "get_preferences",
+        "payload": {
+            "user_id": "user-123",
+            "app_id": "vetra",
+            "limit": 10
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "get_preferences");
+    assert_eq!(msg["payload"]["app_id"], "vetra");
+    assert_eq!(msg["payload"]["limit"], 10);
+}
+
+#[test]
+fn test_get_durable_facts_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "get_durable_facts",
+        "payload": {
+            "user_id": "user-123",
+            "app_id": "vetra",
+            "limit": 8
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "get_durable_facts");
+    assert_eq!(msg["payload"]["app_id"], "vetra");
+    assert_eq!(msg["payload"]["limit"], 8);
+}
+
+#[test]
+fn test_get_recent_events_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "get_recent_events",
+        "payload": {
+            "user_id": "user-123",
+            "session_id": "session-456",
+            "limit": 6
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "get_recent_events");
+    assert_eq!(msg["payload"]["session_id"], "session-456");
+}
+
+#[test]
+fn test_memory_promote_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "memory_promote",
+        "payload": {
+            "record_id": 42,
+            "app_id": "vetra",
+            "target_memory_type": "learned_heuristic",
+            "promotion_reason": "repeated_success"
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "memory_promote");
+    assert_eq!(msg["payload"]["record_id"], 42);
+    assert_eq!(msg["payload"]["target_memory_type"], "learned_heuristic");
+}
+
+#[test]
+fn test_get_metrics_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "get_metrics",
+        "payload": {}
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "get_metrics");
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -409,6 +561,13 @@ fn test_all_ipc_actions_cataloged() {
         "save_memory_record",
         "get_scoped_memory",
         "query_memory_records",
+        "search_memory_records",
+        "get_memory_timeline",
+        "get_working_context",
+        "get_preferences",
+        "get_durable_facts",
+        "get_recent_events",
+        "memory_promote",
         // Knowledge Store
         "store_knowledge",
         "get_knowledge",
@@ -423,9 +582,11 @@ fn test_all_ipc_actions_cataloged() {
         // App Registry
         "list_apps",
         "query_app",
+        // Metrics
+        "get_metrics",
     ];
 
-    assert_eq!(known_actions.len(), 17, "Expected 17 known IPC actions");
+    assert_eq!(known_actions.len(), 25, "Expected 25 known IPC actions");
 
     // Verify no duplicates
     let mut sorted = known_actions.clone();
@@ -446,10 +607,18 @@ fn test_ipc_message_format_is_consistent() {
         serde_json::json!({"action": "get_context", "payload": {"chat_id": "x"}}),
         serde_json::json!({"action": "save_memory_record", "payload": {"user_id": "u", "content": "c", "memory_type": "event"}}),
         serde_json::json!({"action": "query_memory_records", "payload": {"user_id": "u", "memory_type": "event"}}),
+        serde_json::json!({"action": "search_memory_records", "payload": {"user_id": "u", "query": "event"}}),
+        serde_json::json!({"action": "get_memory_timeline", "payload": {"user_id": "u", "session_id": "s"}}),
+        serde_json::json!({"action": "get_working_context", "payload": {"user_id": "u", "session_id": "s"}}),
+        serde_json::json!({"action": "get_preferences", "payload": {"user_id": "u", "app_id": "os-v3"}}),
+        serde_json::json!({"action": "get_durable_facts", "payload": {"user_id": "u", "app_id": "os-v3"}}),
+        serde_json::json!({"action": "get_recent_events", "payload": {"user_id": "u", "session_id": "s"}}),
+        serde_json::json!({"action": "memory_promote", "payload": {"record_id": 1, "app_id": "os-v3"}}),
         serde_json::json!({"action": "list_apps", "payload": {}}),
         serde_json::json!({"action": "store_knowledge", "payload": {"key": "k", "content": "c", "tags": ""}}),
         serde_json::json!({"action": "list_document_indexes", "payload": {"app_id": "vetra"}}),
         serde_json::json!({"action": "query_document_index", "payload": {"app_id": "vetra", "query": "remote work policy"}}),
+        serde_json::json!({"action": "get_metrics", "payload": {}}),
     ];
 
     for msg in &test_messages {

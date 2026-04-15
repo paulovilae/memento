@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, PgPool};
+use sqlx::Row;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,7 +84,10 @@ fn score_node(node: &DocumentIndexNode, query_tokens: &HashSet<String>) -> (f64,
         0.0
     };
 
-    ((overlap_score * 0.7) + (level_bonus * 0.1) + title_bonus, overlap)
+    (
+        (overlap_score * 0.7) + (level_bonus * 0.1) + title_bonus,
+        overlap,
+    )
 }
 
 pub async fn init_tables(pool: &sqlx::PgPool) -> anyhow::Result<()> {
@@ -139,10 +142,31 @@ pub async fn init_tables(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_document_indexes_app_tenant_status
+        ON document_indexes (app_id, tenant_id, index_type, status, updated_at DESC)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_document_index_nodes_document_level
+        ON document_index_nodes (document_id, level, node_id)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }
 
-pub async fn upsert(pool: &sqlx::PgPool, payload: DocumentIndexUpsert) -> anyhow::Result<serde_json::Value> {
+pub async fn upsert(
+    pool: &sqlx::PgPool,
+    payload: DocumentIndexUpsert,
+) -> anyhow::Result<serde_json::Value> {
     if payload.record.document_id.trim().is_empty() {
         anyhow::bail!("document_id is required");
     }
@@ -160,7 +184,7 @@ pub async fn upsert(pool: &sqlx::PgPool, payload: DocumentIndexUpsert) -> anyhow
         INSERT INTO document_indexes (
             document_id, tenant_id, app_id, owner_scope, title, summary, index_type,
             source_type, source_uri, metadata_json, root_node_id, status, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CURRENT_TIMESTAMP)
         ON CONFLICT(document_id) DO UPDATE SET
             tenant_id = excluded.tenant_id,
             app_id = excluded.app_id,
@@ -185,7 +209,13 @@ pub async fn upsert(pool: &sqlx::PgPool, payload: DocumentIndexUpsert) -> anyhow
     .bind(&payload.record.index_type)
     .bind(&payload.record.source_type)
     .bind(&payload.record.source_uri)
-    .bind(payload.record.metadata_json.as_ref().map(|value| value.to_string()))
+    .bind(
+        payload
+            .record
+            .metadata_json
+            .as_ref()
+            .map(|value| value.to_string()),
+    )
     .bind(&payload.record.root_node_id)
     .bind(&payload.record.status)
     .execute(&mut *tx)
@@ -203,7 +233,7 @@ pub async fn upsert(pool: &sqlx::PgPool, payload: DocumentIndexUpsert) -> anyhow
                 document_id, node_id, parent_node_id, title, summary, level, node_type,
                 source_ref, start_offset, end_offset, page_from, page_to, tags_json, metadata_json,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP)
             "#,
         )
         .bind(&payload.record.document_id)
@@ -211,14 +241,18 @@ pub async fn upsert(pool: &sqlx::PgPool, payload: DocumentIndexUpsert) -> anyhow
         .bind(&node.parent_node_id)
         .bind(&node.title)
         .bind(&node.summary)
-        .bind(node.level)
+        .bind(node.level as i32)
         .bind(&node.node_type)
         .bind(&node.source_ref)
-        .bind(node.start_offset)
-        .bind(node.end_offset)
-        .bind(node.page_from)
-        .bind(node.page_to)
-        .bind(node.tags.as_ref().map(|value| serde_json::to_string(value).unwrap_or_default()))
+        .bind(node.start_offset.map(|value| value as i32))
+        .bind(node.end_offset.map(|value| value as i32))
+        .bind(node.page_from.map(|value| value as i32))
+        .bind(node.page_to.map(|value| value as i32))
+        .bind(
+            node.tags
+                .as_ref()
+                .map(|value| serde_json::to_string(value).unwrap_or_default()),
+        )
         .bind(node.metadata_json.as_ref().map(|value| value.to_string()))
         .execute(&mut *tx)
         .await?;
@@ -240,10 +274,10 @@ pub async fn get(
     app_id: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
     let mut sql = String::from(
-        "SELECT document_id, tenant_id, app_id, owner_scope, title, summary, index_type, source_type, source_uri, metadata_json, root_node_id, status FROM document_indexes WHERE document_id = ?",
+        "SELECT document_id, tenant_id, app_id, owner_scope, title, summary, index_type, source_type, source_uri, metadata_json, root_node_id, status FROM document_indexes WHERE document_id = $1",
     );
     if app_id.is_some() {
-        sql.push_str(" AND app_id = ?");
+        sql.push_str(" AND app_id = $2");
     }
 
     let mut query = sqlx::query(&sql).bind(document_id);
@@ -259,7 +293,7 @@ pub async fn get(
         r#"
         SELECT node_id, parent_node_id, title, summary, level, node_type, source_ref, start_offset, end_offset, page_from, page_to, tags_json, metadata_json
         FROM document_index_nodes
-        WHERE document_id = ?
+        WHERE document_id = $1
         ORDER BY level ASC, node_id ASC
         "#,
     )
@@ -275,13 +309,13 @@ pub async fn get(
                 "parent_node_id": node.get::<Option<String>, _>("parent_node_id"),
                 "title": node.get::<String, _>("title"),
                 "summary": node.get::<Option<String>, _>("summary"),
-                "level": node.get::<i64, _>("level"),
+                "level": node.get::<i32, _>("level") as i64,
                 "node_type": node.get::<String, _>("node_type"),
                 "source_ref": node.get::<Option<String>, _>("source_ref"),
-                "start_offset": node.get::<Option<i64>, _>("start_offset"),
-                "end_offset": node.get::<Option<i64>, _>("end_offset"),
-                "page_from": node.get::<Option<i64>, _>("page_from"),
-                "page_to": node.get::<Option<i64>, _>("page_to"),
+                "start_offset": node.get::<Option<i32>, _>("start_offset").map(|value| value as i64),
+                "end_offset": node.get::<Option<i32>, _>("end_offset").map(|value| value as i64),
+                "page_from": node.get::<Option<i32>, _>("page_from").map(|value| value as i64),
+                "page_to": node.get::<Option<i32>, _>("page_to").map(|value| value as i64),
                 "tags": parse_json_value(node.get::<Option<String>, _>("tags_json")),
                 "metadata_json": parse_json_value(node.get::<Option<String>, _>("metadata_json"))
             })
@@ -319,20 +353,24 @@ pub async fn list(
         "SELECT document_id, tenant_id, app_id, owner_scope, title, summary, index_type, source_type, source_uri, root_node_id, status, updated_at FROM document_indexes",
     );
     let mut conditions = Vec::new();
+    let mut next_param = 1;
     if app_id.is_some() {
-        conditions.push("app_id = ?");
+        conditions.push(format!("app_id = ${next_param}"));
+        next_param += 1;
     }
     if tenant_id.is_some() {
-        conditions.push("tenant_id = ?");
+        conditions.push(format!("tenant_id = ${next_param}"));
+        next_param += 1;
     }
     if index_type.is_some() {
-        conditions.push("index_type = ?");
+        conditions.push(format!("index_type = ${next_param}"));
+        next_param += 1;
     }
     if !conditions.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&conditions.join(" AND "));
     }
-    sql.push_str(" ORDER BY updated_at DESC LIMIT ?");
+    sql.push_str(&format!(" ORDER BY updated_at DESC LIMIT ${next_param}"));
 
     let mut query = sqlx::query(&sql);
     if let Some(value) = app_id {
@@ -383,10 +421,14 @@ pub async fn query(
 ) -> anyhow::Result<serde_json::Value> {
     let query_tokens = tokenize(query_text);
     if query_tokens.is_empty() {
-        return Ok(serde_json::json!({ "error": "query must contain at least one alphanumeric token with length >= 3" }));
+        return Ok(
+            serde_json::json!({ "error": "query must contain at least one alphanumeric token with length >= 3" }),
+        );
     }
     if app_id.is_none() && tenant_id.is_none() && document_id.is_none() {
-        return Ok(serde_json::json!({ "error": "At least one filter (document_id, app_id, tenant_id) is required. Global document reads are forbidden." }));
+        return Ok(
+            serde_json::json!({ "error": "At least one filter (document_id, app_id, tenant_id) is required. Global document reads are forbidden." }),
+        );
     }
 
     let mut sql = String::from(
@@ -400,14 +442,17 @@ pub async fn query(
         WHERE idx.index_type = 'page_tree' AND idx.status = 'active'
         "#,
     );
+    let mut next_param = 1;
     if document_id.is_some() {
-        sql.push_str(" AND idx.document_id = ?");
+        sql.push_str(&format!(" AND idx.document_id = ${next_param}"));
+        next_param += 1;
     }
     if app_id.is_some() {
-        sql.push_str(" AND idx.app_id = ?");
+        sql.push_str(&format!(" AND idx.app_id = ${next_param}"));
+        next_param += 1;
     }
     if tenant_id.is_some() {
-        sql.push_str(" AND idx.tenant_id = ?");
+        sql.push_str(&format!(" AND idx.tenant_id = ${next_param}"));
     }
 
     let mut query = sqlx::query(&sql);
@@ -431,13 +476,17 @@ pub async fn query(
             parent_node_id: row.get::<Option<String>, _>("parent_node_id"),
             title: row.get::<String, _>("title"),
             summary: row.get::<Option<String>, _>("summary"),
-            level: row.get::<i64, _>("level"),
+            level: row.get::<i32, _>("level") as i64,
             node_type: row.get::<String, _>("node_type"),
             source_ref: row.get::<Option<String>, _>("source_ref"),
             start_offset: None,
             end_offset: None,
-            page_from: row.get::<Option<i64>, _>("page_from"),
-            page_to: row.get::<Option<i64>, _>("page_to"),
+            page_from: row
+                .get::<Option<i32>, _>("page_from")
+                .map(|value| value as i64),
+            page_to: row
+                .get::<Option<i32>, _>("page_to")
+                .map(|value| value as i64),
             tags,
             metadata_json: None,
         };
@@ -467,9 +516,17 @@ pub async fn query(
     }
 
     results.sort_by(|a, b| {
-        let left = a.get("score").and_then(|value| value.as_f64()).unwrap_or(0.0);
-        let right = b.get("score").and_then(|value| value.as_f64()).unwrap_or(0.0);
-        right.partial_cmp(&left).unwrap_or(std::cmp::Ordering::Equal)
+        let left = a
+            .get("score")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(0.0);
+        let right = b
+            .get("score")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(0.0);
+        right
+            .partial_cmp(&left)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
     results.truncate(limit.max(1).min(25) as usize);
 
@@ -484,14 +541,167 @@ pub async fn query(
 mod tests {
     use super::*;
     use sqlx::postgres::PgPoolOptions;
+    use std::process::Command;
+    use std::thread;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    struct TestPostgresContainer {
+        id: String,
+        db_url: String,
+    }
+
+    impl Drop for TestPostgresContainer {
+        fn drop(&mut self) {
+            let _ = Command::new("docker").args(["rm", "-f", &self.id]).status();
+        }
+    }
+
+    fn docker_available() -> bool {
+        Command::new("docker")
+            .arg("info")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    fn start_test_postgres() -> TestPostgresContainer {
+        assert!(
+            docker_available(),
+            "docker is required for document_index integration tests"
+        );
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let container_name = format!("memento-pg-test-{unique}");
+        let password = "memento_test_pw";
+        let user = "memento_test";
+        let database = "memento_test";
+
+        let run_output = Command::new("docker")
+            .args([
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                &container_name,
+                "-e",
+                &format!("POSTGRES_PASSWORD={password}"),
+                "-e",
+                &format!("POSTGRES_USER={user}"),
+                "-e",
+                &format!("POSTGRES_DB={database}"),
+                "-p",
+                "127.0.0.1::5432",
+                "postgres:16-alpine",
+            ])
+            .output()
+            .expect("failed to start postgres test container");
+
+        assert!(
+            run_output.status.success(),
+            "docker run failed: {}",
+            String::from_utf8_lossy(&run_output.stderr)
+        );
+
+        let container_id = String::from_utf8_lossy(&run_output.stdout)
+            .trim()
+            .to_string();
+        let port_output = Command::new("docker")
+            .args(["port", &container_id, "5432/tcp"])
+            .output()
+            .expect("failed to inspect postgres test container port");
+
+        assert!(
+            port_output.status.success(),
+            "docker port failed: {}",
+            String::from_utf8_lossy(&port_output.stderr)
+        );
+
+        let port_text = String::from_utf8_lossy(&port_output.stdout);
+        let host_port = port_text
+            .trim()
+            .rsplit(':')
+            .next()
+            .expect("missing mapped postgres port")
+            .trim()
+            .to_string();
+
+        let db_url = format!("postgresql://{user}:{password}@127.0.0.1:{host_port}/{database}");
+
+        let mut ready = false;
+        for _ in 0..30 {
+            let ready_output = Command::new("docker")
+                .args([
+                    "exec",
+                    &container_id,
+                    "pg_isready",
+                    "-U",
+                    user,
+                    "-d",
+                    database,
+                ])
+                .output()
+                .expect("failed to probe postgres test container readiness");
+
+            if ready_output.status.success() {
+                ready = true;
+                break;
+            }
+
+            thread::sleep(Duration::from_millis(500));
+        }
+
+        assert!(
+            ready,
+            "postgres test container did not become ready in time"
+        );
+
+        TestPostgresContainer {
+            id: container_id,
+            db_url,
+        }
+    }
 
     #[tokio::test]
     async fn page_tree_index_roundtrip_works() {
-        let pool = sqlx::PgPoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
+        let container = start_test_postgres();
+        let mut last_error = String::new();
+        let mut pool = None;
+        for _ in 0..20 {
+            match PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&container.db_url)
+                .await
+            {
+                Ok(connection) => {
+                    pool = Some(connection);
+                    break;
+                }
+                Err(error) => {
+                    let error_text = error.to_string();
+                    last_error = error_text.clone();
+                    if error_text.contains("Connection refused")
+                        || error_text.contains("Connection reset by peer")
+                        || error_text.contains("the database system is starting up")
+                    {
+                        thread::sleep(Duration::from_millis(500));
+                        continue;
+                    }
+                    panic!(
+                        "failed to connect to postgres test container after readiness probe: {}",
+                        error_text
+                    );
+                }
+            }
+        }
+        let pool = pool.unwrap_or_else(|| {
+            panic!(
+                "failed to connect to postgres test container after retries: {}",
+                last_error
+            )
+        });
 
         init_tables(&pool).await.unwrap();
 
@@ -530,7 +740,9 @@ mod tests {
                     node_id: "approval".to_string(),
                     parent_node_id: Some("root".to_string()),
                     title: "Approval Workflow".to_string(),
-                    summary: Some("Manager approval is required before remote work begins.".to_string()),
+                    summary: Some(
+                        "Manager approval is required before remote work begins.".to_string(),
+                    ),
                     level: 1,
                     node_type: "section".to_string(),
                     source_ref: Some("page:4".to_string()),

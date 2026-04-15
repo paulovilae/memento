@@ -62,6 +62,22 @@ Mandatory rule:
 
 ---
 
+## Current Priorities
+
+Recent hardening work focused on four areas:
+
+- performance: added concrete Postgres indexes for hot memory and document lookup paths
+- structure: reduced repeated `scoped_memory` filter/query logic in the IPC layer
+- operations: `MEMENTO_DATABASE_URL` is now supported for explicit deployment configuration
+- testing: document index integration now runs against an ephemeral Docker Postgres instead of staying ignored
+- security: sensitive IPC actions now require `client.app`, optional per-app tokens, and restricted ACLs
+- lifecycle: scoped memory now tracks `usage_count`, `last_used_at`, and `promoted_from`
+- product: canonical retrieval now includes durable facts, recent events, and explicit memory promotion
+
+This pushes `Memento` closer to a real platform service instead of a collection of useful features.
+
+---
+
 ## IPC Protocol
 
 All communication uses JSON over Unix Domain Socket at `/tmp/memento.sock`.
@@ -70,7 +86,11 @@ All communication uses JSON over Unix Domain Socket at `/tmp/memento.sock`.
 ```json
 {
   "action": "<action_name>",
-  "payload": { ... }
+  "payload": { ... },
+  "client": {
+    "app": "os-v3",
+    "token": "optional-shared-secret"
+  }
 }
 ```
 
@@ -81,6 +101,25 @@ All communication uses JSON over Unix Domain Socket at `/tmp/memento.sock`.
   ...
 }
 ```
+
+Sensitive actions such as `query_app`, schema discovery, knowledge store, bio writes, and document index operations are now gated by local ACLs. Configure them with:
+
+- `MEMENTO_SOCKET_MODE`
+- `MEMENTO_CLIENT_TOKENS`
+- `MEMENTO_PRIVILEGED_CLIENTS`
+- `MEMENTO_APP_QUERY_CLIENTS`
+- `MEMENTO_SCHEMA_CLIENTS`
+- `MEMENTO_DOCUMENT_INDEX_CLIENTS`
+- `MEMENTO_KNOWLEDGE_CLIENTS`
+- `MEMENTO_BIO_CLIENTS`
+- `MEMENTO_AUDIT_CLIENTS`
+
+Additional canonical memory actions now available:
+
+- `get_durable_facts`
+- `get_recent_events`
+- `memory_promote`
+- `get_metrics`
 
 ---
 
@@ -230,7 +269,78 @@ Remove an entry by exact key.
 
 ---
 
-### 3. App Registry (Cross-App Database Access)
+### 3. Scoped Palace Memory
+
+Inspired by the useful part of MemPalace, `Memento` can now persist raw memory records with stable structure instead of forcing everything through summary-only storage.
+
+Each record can optionally live inside:
+
+- `wing` — broad domain or app (`vetra`, `movilo`, `os`)
+- `hall` — sub-domain (`contracts`, `onboarding`, `support`)
+- `room` — concrete thread, case, or workflow (`msa-negotiation`, `tenant-issue-42`)
+
+This keeps verbatim memory navigable without pretending the structure itself is "AI".
+
+#### `save_memory_record`
+Store a verbatim or derived record with optional palace metadata.
+
+```json
+{
+  "action": "save_memory_record",
+  "payload": {
+    "user_id": "user-123",
+    "tenant_id": "tenant-main",
+    "app_id": "vetra",
+    "scope": "workspace",
+    "wing": "vetra",
+    "hall": "contracts",
+    "room": "msa-negotiation",
+    "entry_title": "MSA redlines call",
+    "memory_type": "event",
+    "tags": ["msa", "redlines"],
+    "content": "Counterparty rejected the uncapped indemnity language."
+  }
+}
+```
+
+#### `query_memory_records`
+Filter stored records by identity, app, scope, or palace location.
+
+#### `search_memory_records`
+Search raw records using token overlap against title, content, memory type, and palace metadata.
+
+This is designed for:
+
+- conversation recall
+- project memory
+- case-room timelines
+- high-fidelity debugging trails
+
+#### `get_memory_timeline`
+Return chronological verbatim entries for a scoped room, wing, or session.
+
+#### `get_working_context`
+Return purpose-shaped context for runtime use from the same scoped records:
+
+- summaries
+- decisions
+- preferences
+- open loops
+- recent events
+
+This is the preferred read path when a caller needs actionable context instead of raw storage primitives.
+
+#### `get_preferences`
+Return active, non-expired preference-like memories within the requested scope.
+
+This favors records tagged or typed as preferences and avoids forcing callers to manually filter generic memory rows.
+
+See also:
+- [palace_memory.md](docs/palace_memory.md)
+
+---
+
+### 4. App Registry (Cross-App Database Access)
 
 #### `list_apps`
 List all ImagineOS apps registered in `etc/apps.toml`.
@@ -281,7 +391,7 @@ Only `SELECT` and `WITH` queries are allowed. Results are auto-limited.
 
 ---
 
-### 4. Bayesian Interaction Tracking *(Planned — Phase 1)*
+### 5. Bayesian Interaction Tracking *(Planned — Phase 1)*
 
 #### `log_interaction`
 Log a user choice for Bayesian preference learning.
@@ -294,7 +404,7 @@ Persist the posterior as the new prior for the next session.
 
 ---
 
-### 5. Hybrid Document Retrieval
+### 6. Hybrid Document Retrieval
 
 `Memento` now supports a native document-index backend for structured long-form sources.
 

@@ -39,7 +39,22 @@ check_daemon() {
 }
 
 send_ipc() {
-    echo "$1" | socat -t5 - UNIX-CONNECT:"$SOCK" 2>/dev/null
+    local request="$1"
+    local client_app="${MEMENTO_TEST_CLIENT:-os-v3}"
+    local client_token="${MEMENTO_CLIENT_TOKEN:-}"
+
+    if [ -n "$client_token" ]; then
+        request=$(jq \
+            --arg app "$client_app" \
+            --arg token "$client_token" \
+            '. + {client: {app: $app, token: $token}}' <<<"$request")
+    else
+        request=$(jq \
+            --arg app "$client_app" \
+            '. + {client: {app: $app}}' <<<"$request")
+    fi
+
+    echo "$request" | socat -t5 - UNIX-CONNECT:"$SOCK" 2>/dev/null
 }
 
 test_ipc() {
