@@ -22,6 +22,7 @@ mod knowledge;
 mod metrics;
 mod migrations;
 mod query_cache;
+mod runtime_memory;
 mod schema;
 mod scoped_memory;
 mod security;
@@ -52,10 +53,8 @@ async fn main() -> anyhow::Result<()> {
     let config = config::load_config();
     if config.watched_folders.is_empty() {
         info!("No folders configured yet. Add them via the dashboard!");
-    } else {
-        if let Err(e) = ingestion::start_folder_watcher(config.watched_folders).await {
-            eprintln!("Failed to start folder watcher: {}", e);
-        }
+    } else if let Err(e) = ingestion::start_folder_watcher(config.watched_folders).await {
+        eprintln!("Failed to start folder watcher: {}", e);
     }
 
     // 4. Initialize Memory Database
@@ -74,6 +73,20 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "/home/paulo/Programs/apps/OS".to_string());
     let app_connections = Arc::new(app_registry::discover_apps(&os_root).await);
     let security = Arc::new(security::SecurityConfig::from_env());
+
+    let audit_pool = db_pool.clone();
+    tokio::spawn(async move {
+        loop {
+            match audit::purge_expired_audit_entries(&audit_pool).await {
+                Ok(deleted) if deleted > 0 => {
+                    info!("Purged {} expired audit log rows", deleted);
+                }
+                Ok(_) => {}
+                Err(error) => warn!(?error, "Failed to purge expired audit log rows"),
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(60 * 60 * 24)).await;
+        }
+    });
 
     // 6. Setup Unix Domain Socket (UDS) for Zero-Copy IPC with Hera/Imaginclaw
     let socket_path = "/tmp/memento.sock";
@@ -296,10 +309,29 @@ async fn process_uds_stream(
             "get_durable_facts" => scoped_memory::get_durable_facts(&pool, req.payload).await,
             "get_recent_events" => scoped_memory::get_recent_events(&pool, req.payload).await,
             "memory_promote" => scoped_memory::memory_promote(&pool, req.payload).await,
+            "derive_memory" => scoped_memory::derive_memory(&pool, req.payload).await,
+            "compress_session" => scoped_memory::compress_session(&pool, req.payload).await,
+            "compress_room" => scoped_memory::compress_room(&pool, req.payload).await,
+            "compress_project" => scoped_memory::compress_project(&pool, req.payload).await,
+            "recall_recursive_context" => {
+                scoped_memory::recall_recursive_context(&pool, req.payload).await
+            }
 
             // ─── Virtual Office: Audit Log ─────────────────────────────
             "audit_log" => audit::audit_log(&pool, req.payload).await,
             "get_metrics" => metrics::get_metrics(),
+            "get_runtime_preflight" => {
+                runtime_memory::get_runtime_preflight(&pool, req.payload).await
+            }
+            "record_runtime_observation" => {
+                runtime_memory::record_runtime_observation(&pool, req.payload).await
+            }
+            "promote_runtime_hint" => {
+                runtime_memory::promote_runtime_hint(&pool, req.payload).await
+            }
+            "save_agent_run_summary" => {
+                runtime_memory::save_agent_run_summary(&pool, req.payload).await
+            }
             "upsert_document_index" => document_index_ipc::upsert(&pool, req.payload).await,
             "get_document_index" => document_index_ipc::get(&pool, req.payload).await,
             "list_document_indexes" => document_index_ipc::list(&pool, req.payload).await,

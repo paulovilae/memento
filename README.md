@@ -15,7 +15,6 @@ It is one component inside the canonical Ava bundle:
 - `Sentinel`
 - `Imaginclaw`
 - `Hera/hera-core`
-- `Hera/diakonos-core`
 - `Memento`
 
 Before diagnosing assistant capability or adding features, read:
@@ -113,6 +112,7 @@ Sensitive actions such as `query_app`, schema discovery, knowledge store, bio wr
 - `MEMENTO_KNOWLEDGE_CLIENTS`
 - `MEMENTO_BIO_CLIENTS`
 - `MEMENTO_AUDIT_CLIENTS`
+- `MEMENTO_RUNTIME_CLIENTS`
 
 Additional canonical memory actions now available:
 
@@ -120,6 +120,9 @@ Additional canonical memory actions now available:
 - `get_recent_events`
 - `memory_promote`
 - `get_metrics`
+- `get_runtime_preflight`
+- `record_runtime_observation`
+- `promote_runtime_hint`
 
 ---
 

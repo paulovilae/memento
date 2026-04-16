@@ -303,6 +303,24 @@ fn test_memory_promote_payload_structure() {
 }
 
 #[test]
+fn test_derive_memory_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "derive_memory",
+        "payload": {
+            "user_id": "user-123",
+            "app_id": "vetra",
+            "session_id": "session-456",
+            "level": "all",
+            "force": true
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "derive_memory");
+    assert_eq!(msg["payload"]["level"], "all");
+}
+
+#[test]
 fn test_get_metrics_payload_structure() {
     let payload = serde_json::json!({
         "action": "get_metrics",
@@ -311,6 +329,75 @@ fn test_get_metrics_payload_structure() {
 
     let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
     assert_eq!(msg["action"], "get_metrics");
+}
+
+#[test]
+fn test_compress_session_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "compress_session",
+        "payload": {
+            "user_id": "user-123",
+            "app_id": "vetra",
+            "session_id": "session-456"
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "compress_session");
+    assert_eq!(msg["payload"]["session_id"], "session-456");
+}
+
+#[test]
+fn test_compress_room_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "compress_room",
+        "payload": {
+            "user_id": "user-123",
+            "app_id": "vetra",
+            "wing": "vetra",
+            "hall": "contracts",
+            "room": "msa"
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "compress_room");
+    assert_eq!(msg["payload"]["room"], "msa");
+}
+
+#[test]
+fn test_compress_project_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "compress_project",
+        "payload": {
+            "user_id": "user-123",
+            "app_id": "vetra",
+            "wing": "vetra"
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "compress_project");
+    assert_eq!(msg["payload"]["wing"], "vetra");
+}
+
+#[test]
+fn test_recall_recursive_context_payload_structure() {
+    let payload = serde_json::json!({
+        "action": "recall_recursive_context",
+        "payload": {
+            "user_id": "user-123",
+            "app_id": "vetra",
+            "session_id": "session-456",
+            "wing": "vetra",
+            "hall": "contracts",
+            "room": "msa"
+        }
+    });
+
+    let msg: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
+    assert_eq!(msg["action"], "recall_recursive_context");
+    assert_eq!(msg["payload"]["room"], "msa");
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -568,6 +655,11 @@ fn test_all_ipc_actions_cataloged() {
         "get_durable_facts",
         "get_recent_events",
         "memory_promote",
+        "derive_memory",
+        "compress_session",
+        "compress_room",
+        "compress_project",
+        "recall_recursive_context",
         // Knowledge Store
         "store_knowledge",
         "get_knowledge",
@@ -586,7 +678,7 @@ fn test_all_ipc_actions_cataloged() {
         "get_metrics",
     ];
 
-    assert_eq!(known_actions.len(), 25, "Expected 25 known IPC actions");
+    assert_eq!(known_actions.len(), 30, "Expected 30 known IPC actions");
 
     // Verify no duplicates
     let mut sorted = known_actions.clone();
@@ -614,6 +706,11 @@ fn test_ipc_message_format_is_consistent() {
         serde_json::json!({"action": "get_durable_facts", "payload": {"user_id": "u", "app_id": "os-v3"}}),
         serde_json::json!({"action": "get_recent_events", "payload": {"user_id": "u", "session_id": "s"}}),
         serde_json::json!({"action": "memory_promote", "payload": {"record_id": 1, "app_id": "os-v3"}}),
+        serde_json::json!({"action": "derive_memory", "payload": {"user_id": "u", "app_id": "os-v3", "level": "all"}}),
+        serde_json::json!({"action": "compress_session", "payload": {"user_id": "u", "app_id": "os-v3", "session_id": "s"}}),
+        serde_json::json!({"action": "compress_room", "payload": {"user_id": "u", "app_id": "os-v3", "room": "r"}}),
+        serde_json::json!({"action": "compress_project", "payload": {"user_id": "u", "app_id": "os-v3", "wing": "w"}}),
+        serde_json::json!({"action": "recall_recursive_context", "payload": {"user_id": "u", "app_id": "os-v3", "session_id": "s"}}),
         serde_json::json!({"action": "list_apps", "payload": {}}),
         serde_json::json!({"action": "store_knowledge", "payload": {"key": "k", "content": "c", "tags": ""}}),
         serde_json::json!({"action": "list_document_indexes", "payload": {"app_id": "vetra"}}),

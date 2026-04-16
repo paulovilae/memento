@@ -397,6 +397,37 @@ async fn migration_6_document_index(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     document_index::init_tables(pool).await
 }
 
+async fn migration_7_audit_chain(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    sqlx::query("ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS payload_json JSONB")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS prev_entry_hash TEXT")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS entry_hash TEXT")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS signature_verified BOOLEAN DEFAULT false",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS retention_until TIMESTAMP")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_log_entry_hash ON audit_log(entry_hash)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_audit_log_retention_until ON audit_log(retention_until)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn run_all(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     ensure_migrations_table(pool).await?;
 
@@ -412,6 +443,7 @@ pub async fn run_all(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     run_migration(pool, 4, "scoped_memory", migration_4_scoped_memory(pool)).await?;
     run_migration(pool, 5, "audit_and_bio", migration_5_audit_and_bio(pool)).await?;
     run_migration(pool, 6, "document_index", migration_6_document_index(pool)).await?;
+    run_migration(pool, 7, "audit_chain", migration_7_audit_chain(pool)).await?;
 
     Ok(())
 }

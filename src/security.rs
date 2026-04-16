@@ -17,6 +17,7 @@ pub struct SecurityConfig {
     knowledge_clients: HashSet<String>,
     app_query_clients: HashSet<String>,
     schema_clients: HashSet<String>,
+    runtime_clients: HashSet<String>,
     document_index_clients: HashSet<String>,
     bio_clients: HashSet<String>,
     audit_clients: HashSet<String>,
@@ -35,10 +36,18 @@ fn parse_set_env(var: &str, default: &[&str]) -> HashSet<String> {
 }
 
 fn parse_tokens_env(var: &str) -> HashMap<String, String> {
-    let raw = match std::env::var(var) {
-        Ok(value) => value,
-        Err(_) => return HashMap::new(),
-    };
+    let raw = std::env::var(var)
+        .ok()
+        .or_else(|| {
+            let file_var = format!("{}_FILE", var);
+            let path = std::env::var(file_var).ok()?;
+            std::fs::read_to_string(path).ok()
+        })
+        .unwrap_or_default();
+
+    if raw.trim().is_empty() {
+        return HashMap::new();
+    }
 
     if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&raw) {
         return map
@@ -73,6 +82,7 @@ impl SecurityConfig {
             ),
             app_query_clients: parse_set_env("MEMENTO_APP_QUERY_CLIENTS", &["hera", "os-v3"]),
             schema_clients: parse_set_env("MEMENTO_SCHEMA_CLIENTS", &["hera", "os-v3"]),
+            runtime_clients: parse_set_env("MEMENTO_RUNTIME_CLIENTS", &["hera", "os-v3"]),
             document_index_clients: parse_set_env(
                 "MEMENTO_DOCUMENT_INDEX_CLIENTS",
                 &["hera", "os-v3", "vetra"],
@@ -83,7 +93,7 @@ impl SecurityConfig {
             ),
             audit_clients: parse_set_env(
                 "MEMENTO_AUDIT_CLIENTS",
-                &["hera", "os-v3", "paulovila-rust"],
+                &["hera", "os-v3", "paulovila-rust", "sentinel"],
             ),
         }
     }
@@ -186,6 +196,13 @@ impl SecurityConfig {
                 self.authenticate_client(client, &self.audit_clients, action)?;
                 Ok(())
             }
+            "get_runtime_preflight"
+            | "record_runtime_observation"
+            | "promote_runtime_hint"
+            | "save_agent_run_summary" => {
+                let client_app = self.authenticate_client(client, &self.runtime_clients, action)?;
+                self.require_payload_app_match(&client_app, payload, "app_id", action)
+            }
             "save_scoped_memory"
             | "save_memory_record"
             | "get_scoped_memory"
@@ -196,7 +213,12 @@ impl SecurityConfig {
             | "get_preferences"
             | "get_durable_facts"
             | "get_recent_events"
-            | "memory_promote" => {
+            | "memory_promote"
+            | "derive_memory"
+            | "compress_session"
+            | "compress_room"
+            | "compress_project"
+            | "recall_recursive_context" => {
                 if let Some(client) = client {
                     let client_app = client.app.trim().to_lowercase();
                     if !client_app.is_empty() {

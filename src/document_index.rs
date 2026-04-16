@@ -382,7 +382,7 @@ pub async fn list(
     if let Some(value) = index_type {
         query = query.bind(value);
     }
-    query = query.bind(limit.max(1).min(100));
+    query = query.bind(limit.clamp(1, 100));
 
     let rows = query.fetch_all(pool).await?;
     let documents: Vec<serde_json::Value> = rows
@@ -528,7 +528,7 @@ pub async fn query(
             .partial_cmp(&left)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    results.truncate(limit.max(1).min(25) as usize);
+    results.truncate(limit.clamp(1, 25) as usize);
 
     Ok(serde_json::json!({
         "status": "success",
@@ -628,7 +628,9 @@ mod tests {
             .trim()
             .to_string();
 
-        let db_url = format!("postgresql://{user}:{password}@127.0.0.1:{host_port}/{database}");
+        let db_url = format!(
+            "postgresql://{user}:{password}@127.0.0.1:{host_port}/{database}?sslmode=disable"
+        );
 
         let mut ready = false;
         for _ in 0..30 {
@@ -685,6 +687,7 @@ mod tests {
                     if error_text.contains("Connection refused")
                         || error_text.contains("Connection reset by peer")
                         || error_text.contains("the database system is starting up")
+                        || error_text.contains("unexpected response from SSLRequest")
                     {
                         thread::sleep(Duration::from_millis(500));
                         continue;

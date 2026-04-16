@@ -321,6 +321,11 @@ fn row_content_json(row: &sqlx::postgres::PgRow) -> Option<Value> {
     parse_json_value(row.get::<Option<String>, _>("content_json"))
 }
 
+fn row_confidence(row: &sqlx::postgres::PgRow) -> Option<f64> {
+    row.get::<Option<f32>, _>("confidence")
+        .map(|value| value as f64)
+}
+
 fn has_any_tag(tags: &[String], expected: &[&str]) -> bool {
     tags.iter()
         .any(|tag| expected.iter().any(|candidate| tag == candidate))
@@ -362,6 +367,649 @@ fn is_open_loop_entry(row: &sqlx::postgres::PgRow, tags: &[String]) -> bool {
     let memory_type = row.get::<String, _>("memory_type").to_lowercase();
     matches!(memory_type.as_str(), "open_loop" | "todo" | "task")
         || has_any_tag(tags, &["open_loop", "followup", "pending", "todo"])
+}
+
+fn bullet_lines(rows: &[&sqlx::postgres::PgRow], limit: usize) -> Vec<String> {
+    rows.iter()
+        .take(limit)
+        .map(|row| {
+            let title = row.get::<String, _>("entry_title");
+            let content = row.get::<String, _>("content");
+            if !title.trim().is_empty() && title != "memory entry" {
+                format!("- {}: {}", title, trim_message_for_budget(&content, 140))
+            } else {
+                format!("- {}", trim_message_for_budget(&content, 160))
+            }
+        })
+        .collect()
+}
+
+fn join_lines(lines: &[String], empty_fallback: &str) -> String {
+    if lines.is_empty() {
+        empty_fallback.to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn compression_kind_tag(kind: &str) -> &'static str {
+    match kind {
+        "session" => "session_summary",
+        "room" => "room_summary",
+        "project" => "project_summary",
+        _ => "recursive_summary",
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DerivationSeed {
+    user_id: String,
+    tenant_id: String,
+    app_id: String,
+    session_id: String,
+    scope: String,
+    source: String,
+    wing: String,
+    hall: String,
+    room: String,
+    memory_type: String,
+    derivation_method: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SaveRecordInput {
+    user_id: String,
+    tenant_id: String,
+    app_id: String,
+    expert_id: String,
+    session_id: String,
+    device_id: String,
+    scope: String,
+    source: String,
+    wing: String,
+    hall: String,
+    room: String,
+    entry_title: String,
+    memory_type: String,
+    content: String,
+    tags: Vec<String>,
+    content_json: Option<Value>,
+    confidence: Option<f64>,
+    provenance_refs: Option<Value>,
+    derivation_method: Option<String>,
+    status: String,
+    expires_at: Option<String>,
+    usage_count: i32,
+    last_used_at: Option<String>,
+    promoted_from: Option<String>,
+}
+
+impl SaveRecordInput {
+    fn from_payload(payload: &Value) -> Result<Self, Value> {
+        let user_id = payload
+            .get("user_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let content = payload
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if user_id.is_empty() || content.is_empty() {
+            return Err(
+                serde_json::json!({ "error": "Missing 'user_id' or 'content' in payload" }),
+            );
+        }
+
+        Ok(Self {
+            user_id,
+            tenant_id: payload
+                .get("tenant_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("default")
+                .to_string(),
+            app_id: payload
+                .get("app_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("os")
+                .to_string(),
+            expert_id: payload
+                .get("expert_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("ava")
+                .to_string(),
+            session_id: payload
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            device_id: payload
+                .get("device_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("server")
+                .to_string(),
+            scope: payload
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .unwrap_or("personal")
+                .to_string(),
+            source: payload
+                .get("source")
+                .and_then(|v| v.as_str())
+                .unwrap_or("chat")
+                .to_string(),
+            wing: payload
+                .get("wing")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            hall: payload
+                .get("hall")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            room: payload
+                .get("room")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            entry_title: payload
+                .get("entry_title")
+                .and_then(|v| v.as_str())
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| derive_entry_title(&content)),
+            memory_type: payload
+                .get("memory_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("event")
+                .to_string(),
+            content,
+            tags: normalize_tags(payload.get("tags")),
+            content_json: payload
+                .get("content_json")
+                .filter(|v| !v.is_null())
+                .cloned(),
+            confidence: payload.get("confidence").and_then(|v| v.as_f64()),
+            provenance_refs: payload
+                .get("provenance_refs")
+                .filter(|v| !v.is_null())
+                .cloned(),
+            derivation_method: payload
+                .get("derivation_method")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            status: payload
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("active")
+                .to_string(),
+            expires_at: payload
+                .get("expires_at")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            usage_count: payload
+                .get("usage_count")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+                .max(0) as i32,
+            last_used_at: payload
+                .get("last_used_at")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            promoted_from: payload
+                .get("promoted_from")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        })
+    }
+
+    fn seed(&self) -> DerivationSeed {
+        DerivationSeed {
+            user_id: self.user_id.clone(),
+            tenant_id: self.tenant_id.clone(),
+            app_id: self.app_id.clone(),
+            session_id: self.session_id.clone(),
+            scope: self.scope.clone(),
+            source: self.source.clone(),
+            wing: self.wing.clone(),
+            hall: self.hall.clone(),
+            room: self.room.clone(),
+            memory_type: self.memory_type.clone(),
+            derivation_method: self.derivation_method.clone(),
+        }
+    }
+}
+
+async fn insert_record_only(
+    pool: &sqlx::PgPool,
+    input: &SaveRecordInput,
+) -> Result<i32, sqlx::Error> {
+    sqlx::query_scalar::<_, i32>("INSERT INTO scoped_memory (user_id, tenant_id, app_id, expert_id, session_id, device_id, scope, source, wing, hall, room, entry_title, memory_type, content, tags_json, content_json, confidence, provenance_refs, derivation_method, status, expires_at, usage_count, last_used_at, promoted_from) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, CAST($21 AS TIMESTAMP), $22, CAST($23 AS TIMESTAMP), $24) RETURNING id")
+        .bind(&input.user_id)
+        .bind(&input.tenant_id)
+        .bind(&input.app_id)
+        .bind(&input.expert_id)
+        .bind(&input.session_id)
+        .bind(&input.device_id)
+        .bind(&input.scope)
+        .bind(&input.source)
+        .bind(&input.wing)
+        .bind(&input.hall)
+        .bind(&input.room)
+        .bind(&input.entry_title)
+        .bind(&input.memory_type)
+        .bind(&input.content)
+        .bind(if input.tags.is_empty() {
+            None
+        } else {
+            Some(
+                Value::Array(
+                    input
+                        .tags
+                        .iter()
+                        .map(|tag| Value::String(tag.clone()))
+                        .collect(),
+                )
+                .to_string(),
+            )
+        })
+        .bind(input.content_json.as_ref().map(|value| value.to_string()))
+        .bind(input.confidence)
+        .bind(input.provenance_refs.as_ref().map(|value| value.to_string()))
+        .bind(input.derivation_method.as_deref())
+        .bind(&input.status)
+        .bind(input.expires_at.as_deref())
+        .bind(input.usage_count)
+        .bind(input.last_used_at.as_deref())
+        .bind(input.promoted_from.as_deref())
+        .fetch_one(pool)
+        .await
+}
+
+fn save_record_response(input: &SaveRecordInput, record_id: i32, derived: Vec<Value>) -> Value {
+    serde_json::json!({
+        "status": "success",
+        "action": "memory_record_saved",
+        "record_id": record_id,
+        "scope": input.scope,
+        "user_id": input.user_id,
+        "memory_type": input.memory_type,
+        "wing": input.wing,
+        "hall": input.hall,
+        "room": input.room,
+        "entry_title": input.entry_title,
+        "usage_count": input.usage_count,
+        "promoted_from": input.promoted_from,
+        "derived": derived
+    })
+}
+
+fn should_skip_auto_derivation(seed: &DerivationSeed) -> bool {
+    seed.source == "recursive_compression"
+        || matches!(
+            seed.memory_type.as_str(),
+            "working_summary" | "summary" | "learned_heuristic"
+        )
+        || seed
+            .derivation_method
+            .as_deref()
+            .map(|value| value.starts_with("recursive_"))
+            .unwrap_or(false)
+}
+
+fn derivation_filters(kind: &str, seed: &DerivationSeed) -> Value {
+    match kind {
+        "session" => serde_json::json!({
+            "user_id": seed.user_id,
+            "tenant_id": seed.tenant_id,
+            "app_id": seed.app_id,
+            "session_id": seed.session_id,
+            "scope": seed.scope
+        }),
+        "room" => serde_json::json!({
+            "user_id": seed.user_id,
+            "tenant_id": seed.tenant_id,
+            "app_id": seed.app_id,
+            "wing": seed.wing,
+            "hall": seed.hall,
+            "room": seed.room,
+            "scope": seed.scope
+        }),
+        "project" => serde_json::json!({
+            "user_id": seed.user_id,
+            "tenant_id": seed.tenant_id,
+            "app_id": seed.app_id,
+            "wing": seed.wing,
+            "scope": seed.scope
+        }),
+        _ => serde_json::json!({
+            "user_id": seed.user_id,
+            "tenant_id": seed.tenant_id,
+            "app_id": seed.app_id,
+            "scope": seed.scope
+        }),
+    }
+}
+
+fn raw_record_conditions() -> &'static [&'static str] {
+    &[
+        "status = 'active'",
+        "(expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)",
+        "source <> 'recursive_compression'",
+        "memory_type <> 'working_summary'",
+    ]
+}
+
+async fn fetch_latest_summary_timestamp(
+    pool: &sqlx::PgPool,
+    filters: &ScopedMemoryFilters,
+    tag: &str,
+) -> Result<Option<chrono::NaiveDateTime>, sqlx::Error> {
+    let (where_clause, bind_values) = filters.build_where_clause();
+    let sql = format!(
+        "SELECT timestamp FROM scoped_memory WHERE {} AND status = 'active' AND source = 'recursive_compression' AND tags_json ILIKE '%{}%' ORDER BY timestamp DESC LIMIT 1",
+        where_clause, tag
+    );
+    let mut query = sqlx::query(&sql);
+    for value in &bind_values {
+        query = query.bind(value);
+    }
+    query
+        .fetch_optional(pool)
+        .await
+        .map(|row| row.map(|row| row.get::<chrono::NaiveDateTime, _>("timestamp")))
+}
+
+async fn count_rows_since(
+    pool: &sqlx::PgPool,
+    filters: &ScopedMemoryFilters,
+    extra_conditions: &[&str],
+    since: Option<chrono::NaiveDateTime>,
+) -> Result<i64, sqlx::Error> {
+    let (where_clause, bind_values) = filters.build_where_clause();
+    let mut conditions = vec![where_clause];
+    conditions.extend(extra_conditions.iter().map(|value| value.to_string()));
+    if since.is_some() {
+        conditions.push(format!("timestamp > ${}", bind_values.len() + 1));
+    }
+    let sql = format!(
+        "SELECT COUNT(*) AS count FROM scoped_memory WHERE {}",
+        conditions.join(" AND ")
+    );
+    let mut query = sqlx::query_scalar::<_, i64>(&sql);
+    for value in &bind_values {
+        query = query.bind(value);
+    }
+    if let Some(since) = since {
+        query = query.bind(since);
+    }
+    query.fetch_one(pool).await
+}
+
+async fn should_derive_kind(
+    pool: &sqlx::PgPool,
+    kind: &str,
+    seed: &DerivationSeed,
+    force: bool,
+) -> Result<bool, sqlx::Error> {
+    if force {
+        return Ok(true);
+    }
+
+    let payload = derivation_filters(kind, seed);
+    let filters = ScopedMemoryFilters::from_payload(&payload);
+    let latest_summary =
+        fetch_latest_summary_timestamp(pool, &filters, compression_kind_tag(kind)).await?;
+    let raw_count =
+        count_rows_since(pool, &filters, raw_record_conditions(), latest_summary).await?;
+
+    let threshold_met = match kind {
+        "session" => !seed.session_id.is_empty() && raw_count >= 6,
+        "room" => !seed.room.is_empty() && raw_count >= 10,
+        "project" => !seed.wing.is_empty() && raw_count >= 14,
+        _ => false,
+    };
+
+    if threshold_met {
+        return Ok(true);
+    }
+
+    match kind {
+        "room" => {
+            let session_summary_count = count_rows_since(
+                pool,
+                &filters,
+                &[
+                    "status = 'active'",
+                    "(expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)",
+                    "source = 'recursive_compression'",
+                    "tags_json ILIKE '%session_summary%'",
+                ],
+                latest_summary,
+            )
+            .await?;
+            Ok(session_summary_count >= 2)
+        }
+        "project" => {
+            let room_summary_count = count_rows_since(
+                pool,
+                &filters,
+                &[
+                    "status = 'active'",
+                    "(expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)",
+                    "source = 'recursive_compression'",
+                    "tags_json ILIKE '%room_summary%'",
+                ],
+                latest_summary,
+            )
+            .await?;
+            Ok(room_summary_count >= 2)
+        }
+        _ => Ok(false),
+    }
+}
+
+async fn maybe_run_continuous_derivation(
+    pool: &sqlx::PgPool,
+    seed: &DerivationSeed,
+    force: bool,
+) -> Vec<Value> {
+    if should_skip_auto_derivation(seed) {
+        return Vec::new();
+    }
+
+    let mut derived = Vec::new();
+
+    if should_derive_kind(pool, "session", seed, force)
+        .await
+        .unwrap_or(false)
+    {
+        let payload = derivation_filters("session", seed);
+        if let Ok(value) = build_recursive_summary(pool, "session", &payload).await {
+            if value.get("error").is_none() {
+                derived.push(value);
+            }
+        }
+    }
+
+    if should_derive_kind(pool, "room", seed, force)
+        .await
+        .unwrap_or(false)
+    {
+        let payload = derivation_filters("room", seed);
+        if let Ok(value) = build_recursive_summary(pool, "room", &payload).await {
+            if value.get("error").is_none() {
+                derived.push(value);
+            }
+        }
+    }
+
+    if should_derive_kind(pool, "project", seed, force)
+        .await
+        .unwrap_or(false)
+    {
+        let payload = derivation_filters("project", seed);
+        if let Ok(value) = build_recursive_summary(pool, "project", &payload).await {
+            if value.get("error").is_none() {
+                derived.push(value);
+            }
+        }
+    }
+
+    derived
+}
+
+async fn build_recursive_summary(
+    pool: &sqlx::PgPool,
+    kind: &str,
+    payload: &Value,
+) -> Result<Value, sqlx::Error> {
+    let filters = ScopedMemoryFilters::from_payload(payload);
+    let source_limit = clamp_i64(
+        payload
+            .get("source_limit")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(80),
+        10,
+        200,
+    );
+    let title_override = payload
+        .get("entry_title")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    let rows = fetch_scoped_rows(
+        pool,
+        &filters,
+        source_limit,
+        "timestamp DESC",
+        &[
+            "status = 'active'",
+            "(expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)",
+        ],
+    )
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(serde_json::json!({ "error": "No source records found to compress" }));
+    }
+
+    let summaries: Vec<&sqlx::postgres::PgRow> = rows
+        .iter()
+        .filter(|row| is_summary_entry(row, &row_tags(row)))
+        .collect();
+    let decisions: Vec<&sqlx::postgres::PgRow> = rows
+        .iter()
+        .filter(|row| is_decision_entry(row, &row_tags(row)))
+        .collect();
+    let preferences: Vec<&sqlx::postgres::PgRow> = rows
+        .iter()
+        .filter(|row| is_preference_entry(row, &row_tags(row)))
+        .collect();
+    let open_loops: Vec<&sqlx::postgres::PgRow> = rows
+        .iter()
+        .filter(|row| is_open_loop_entry(row, &row_tags(row)))
+        .collect();
+    let events: Vec<&sqlx::postgres::PgRow> = rows
+        .iter()
+        .filter(|row| {
+            row.get::<String, _>("memory_type")
+                .eq_ignore_ascii_case("event")
+        })
+        .collect();
+
+    let operational = join_lines(
+        &bullet_lines(&summaries, 4),
+        "No prior operational summaries captured.",
+    );
+    let decisions_text = join_lines(
+        &bullet_lines(&decisions, 6),
+        "No durable decisions captured.",
+    );
+    let preferences_text = join_lines(
+        &bullet_lines(&preferences, 6),
+        "No stable preferences detected.",
+    );
+    let loops_text = join_lines(&bullet_lines(&open_loops, 8), "No open loops pending.");
+    let events_text = join_lines(
+        &bullet_lines(&events, 8),
+        "No recent events worth compressing.",
+    );
+
+    let summary_content = format!(
+        "Operational Summary\n{}\n\nDecisions Taken\n{}\n\nPreferences Detected\n{}\n\nOpen Loops\n{}\n\nRecent Events\n{}",
+        operational, decisions_text, preferences_text, loops_text, events_text
+    );
+
+    let source = &rows[0];
+    let promoted_from: Vec<i32> = rows.iter().map(|row| row.get::<i32, _>("id")).collect();
+    let scope = source.get::<String, _>("scope");
+    let app_id = source.get::<String, _>("app_id");
+    let session_id = source.get::<String, _>("session_id");
+    let wing = source.get::<String, _>("wing");
+    let hall = source.get::<String, _>("hall");
+    let room = source.get::<String, _>("room");
+    let default_title = match kind {
+        "session" => format!("session summary {}", session_id),
+        "room" => format!("room summary {} / {}", hall, room),
+        "project" => format!("project summary {}", wing),
+        _ => "recursive summary".to_string(),
+    };
+
+    let summary_payload = serde_json::json!({
+        "user_id": source.get::<String, _>("user_id"),
+        "tenant_id": source.get::<String, _>("tenant_id"),
+        "app_id": app_id,
+        "expert_id": source.get::<String, _>("expert_id"),
+        "session_id": session_id,
+        "device_id": source.get::<String, _>("device_id"),
+        "scope": scope,
+        "source": "recursive_compression",
+        "wing": wing,
+        "hall": hall,
+        "room": room,
+        "entry_title": title_override.unwrap_or(default_title),
+        "memory_type": "working_summary",
+        "content": summary_content,
+        "tags": ["summary", "working_summary", "recursive_summary", compression_kind_tag(kind)],
+        "content_json": {
+            "compression_kind": kind,
+            "source_count": rows.len(),
+            "sections": {
+                "operational_summary": operational,
+                "decisions_taken": decisions_text,
+                "preferences_detected": preferences_text,
+                "open_loops": loops_text,
+                "recent_events": events_text
+            }
+        },
+        "confidence": 0.78,
+        "derivation_method": format!("recursive_{}_compression", kind),
+        "promoted_from": serde_json::json!(promoted_from).to_string()
+    });
+    let input = match SaveRecordInput::from_payload(&summary_payload) {
+        Ok(input) => input,
+        Err(error) => return Ok(error),
+    };
+    let response = match insert_record_only(pool, &input).await {
+        Ok(record_id) => {
+            crate::query_cache::invalidate_all();
+            save_record_response(&input, record_id, Vec::new())
+        }
+        Err(error) => serde_json::json!({ "error": format!("DB error: {}", error) }),
+    };
+
+    Ok(serde_json::json!({
+        "status": if response.get("error").is_some() { "error" } else { "success" },
+        "compression_kind": kind,
+        "source_count": rows.len(),
+        "summary": response
+    }))
 }
 
 fn is_durable_fact_entry(row: &sqlx::postgres::PgRow, tags: &[String]) -> bool {
@@ -459,33 +1107,37 @@ async fn fetch_scoped_rows_with_query(
     query.bind(query_text).fetch_all(pool).await
 }
 
+struct ScopedMemoryCandidateView<'a> {
+    content: &'a str,
+    entry_title: &'a str,
+    memory_type: &'a str,
+    wing: &'a str,
+    hall: &'a str,
+    room: &'a str,
+    tags: &'a [String],
+}
+
 fn score_scoped_memory_candidate(
     query_tokens: &HashSet<String>,
     recency_rank: usize,
     total_candidates: usize,
-    content: &str,
-    entry_title: &str,
-    memory_type: &str,
-    wing: &str,
-    hall: &str,
-    room: &str,
-    tags: &[String],
+    candidate: ScopedMemoryCandidateView<'_>,
 ) -> (f64, usize) {
     let mut combined = String::new();
-    combined.push_str(entry_title);
+    combined.push_str(candidate.entry_title);
     combined.push(' ');
-    combined.push_str(content);
+    combined.push_str(candidate.content);
     combined.push(' ');
-    combined.push_str(memory_type);
+    combined.push_str(candidate.memory_type);
     combined.push(' ');
-    combined.push_str(wing);
+    combined.push_str(candidate.wing);
     combined.push(' ');
-    combined.push_str(hall);
+    combined.push_str(candidate.hall);
     combined.push(' ');
-    combined.push_str(room);
-    if !tags.is_empty() {
+    combined.push_str(candidate.room);
+    if !candidate.tags.is_empty() {
         combined.push(' ');
-        combined.push_str(&tags.join(" "));
+        combined.push_str(&candidate.tags.join(" "));
     }
 
     let haystack_tokens = tokenize_memory(&combined);
@@ -500,16 +1152,16 @@ fn score_scoped_memory_candidate(
     } else {
         1.0 - (recency_rank as f64 / (total_candidates - 1) as f64)
     };
-    let structure_bonus = if !room.is_empty() {
+    let structure_bonus = if !candidate.room.is_empty() {
         0.08
-    } else if !hall.is_empty() {
+    } else if !candidate.hall.is_empty() {
         0.05
-    } else if !wing.is_empty() {
+    } else if !candidate.wing.is_empty() {
         0.03
     } else {
         0.0
     };
-    let title_bonus = if tokenize_memory(entry_title)
+    let title_bonus = if tokenize_memory(candidate.entry_title)
         .intersection(query_tokens)
         .next()
         .is_some()
@@ -545,7 +1197,7 @@ fn scoped_memory_row_to_json(row: &sqlx::postgres::PgRow) -> Value {
         "tags": parse_json_string_array(row.get::<Option<String>, _>("tags_json")),
         "content_json": row.get::<Option<String>, _>("content_json")
             .and_then(|value| serde_json::from_str::<Value>(&value).ok()),
-        "confidence": row.get::<Option<f64>, _>("confidence"),
+        "confidence": row_confidence(row),
         "provenance_refs": row.get::<Option<String>, _>("provenance_refs")
             .and_then(|value| serde_json::from_str::<Value>(&value).ok()),
         "derivation_method": row.get::<Option<String>, _>("derivation_method"),
@@ -586,142 +1238,27 @@ async fn touch_usage(pool: &sqlx::PgPool, ids: &[i32]) -> Result<(), sqlx::Error
 }
 
 pub async fn save_record(pool: &sqlx::PgPool, payload: Value) -> Value {
-    let user_id = payload
-        .get("user_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let tenant_id = payload
-        .get("tenant_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("default");
-    let app_id = payload
-        .get("app_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("os");
-    let expert_id = payload
-        .get("expert_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("ava");
-    let session_id = payload
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let device_id = payload
-        .get("device_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("server");
-    let scope = payload
-        .get("scope")
-        .and_then(|v| v.as_str())
-        .unwrap_or("personal");
-    let source = payload
-        .get("source")
-        .and_then(|v| v.as_str())
-        .unwrap_or("chat");
-    let memory_type = payload
-        .get("memory_type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("event");
-    let content = payload
-        .get("content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let wing = payload.get("wing").and_then(|v| v.as_str()).unwrap_or("");
-    let hall = payload.get("hall").and_then(|v| v.as_str()).unwrap_or("");
-    let room = payload.get("room").and_then(|v| v.as_str()).unwrap_or("");
-    let entry_title = payload
-        .get("entry_title")
-        .and_then(|v| v.as_str())
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| derive_entry_title(content));
-    let tags = normalize_tags(payload.get("tags"));
-    let content_json = payload
-        .get("content_json")
-        .filter(|v| !v.is_null())
-        .cloned();
-    let confidence = payload.get("confidence").and_then(|v| v.as_f64());
-    let provenance_refs = payload
-        .get("provenance_refs")
-        .filter(|v| !v.is_null())
-        .cloned();
-    let derivation_method = payload.get("derivation_method").and_then(|v| v.as_str());
-    let status = payload
-        .get("status")
-        .and_then(|v| v.as_str())
-        .unwrap_or("active");
-    let expires_at = payload.get("expires_at").and_then(|v| v.as_str());
-    let usage_count = payload
-        .get("usage_count")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0)
-        .max(0) as i32;
-    let last_used_at = payload.get("last_used_at").and_then(|v| v.as_str());
-    let promoted_from = payload
-        .get("promoted_from")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+    let auto_derive = payload
+        .get("auto_derive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
 
-    if user_id.is_empty() || content.is_empty() {
-        serde_json::json!({ "error": "Missing 'user_id' or 'content' in payload" })
-    } else {
-        let result = sqlx::query("INSERT INTO scoped_memory (user_id, tenant_id, app_id, expert_id, session_id, device_id, scope, source, wing, hall, room, entry_title, memory_type, content, tags_json, content_json, confidence, provenance_refs, derivation_method, status, expires_at, usage_count, last_used_at, promoted_from) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, CAST($21 AS TIMESTAMP), $22, CAST($23 AS TIMESTAMP), $24)")
-            .bind(user_id)
-            .bind(tenant_id)
-            .bind(app_id)
-            .bind(expert_id)
-            .bind(session_id)
-            .bind(device_id)
-            .bind(scope)
-            .bind(source)
-            .bind(wing)
-            .bind(hall)
-            .bind(room)
-            .bind(&entry_title)
-            .bind(memory_type)
-            .bind(content)
-            .bind(if tags.is_empty() {
-                None
+    let input = match SaveRecordInput::from_payload(&payload) {
+        Ok(input) => input,
+        Err(error) => return error,
+    };
+
+    match insert_record_only(pool, &input).await {
+        Ok(record_id) => {
+            crate::query_cache::invalidate_all();
+            let derived = if auto_derive {
+                maybe_run_continuous_derivation(pool, &input.seed(), false).await
             } else {
-                Some(Value::Array(
-                    tags.iter()
-                        .map(|tag| Value::String(tag.clone()))
-                        .collect(),
-                )
-                .to_string())
-            })
-            .bind(content_json.as_ref().map(|value| value.to_string()))
-            .bind(confidence)
-            .bind(provenance_refs.as_ref().map(|value| value.to_string()))
-            .bind(derivation_method)
-            .bind(status)
-            .bind(expires_at)
-            .bind(usage_count)
-            .bind(last_used_at)
-            .bind(promoted_from.as_deref())
-            .execute(pool)
-            .await;
-
-        match result {
-            Ok(_) => {
-                crate::query_cache::invalidate_all();
-                serde_json::json!({
-                    "status": "success",
-                    "action": "memory_record_saved",
-                    "scope": scope,
-                    "user_id": user_id,
-                    "memory_type": memory_type,
-                    "wing": wing,
-                    "hall": hall,
-                    "room": room,
-                    "entry_title": entry_title,
-                    "usage_count": usage_count,
-                    "promoted_from": promoted_from
-                })
-            }
-            Err(e) => serde_json::json!({ "error": format!("DB error: {}", e) }),
+                Vec::new()
+            };
+            save_record_response(&input, record_id, derived)
         }
+        Err(e) => serde_json::json!({ "error": format!("DB error: {}", e) }),
     }
 }
 
@@ -1054,6 +1591,174 @@ pub async fn get_working_context(pool: &sqlx::PgPool, payload: Value) -> Value {
     }
 }
 
+pub async fn compress_session(pool: &sqlx::PgPool, payload: Value) -> Value {
+    match build_recursive_summary(pool, "session", &payload).await {
+        Ok(value) => value,
+        Err(e) => serde_json::json!({ "error": format!("Compression error: {}", e) }),
+    }
+}
+
+pub async fn compress_room(pool: &sqlx::PgPool, payload: Value) -> Value {
+    match build_recursive_summary(pool, "room", &payload).await {
+        Ok(value) => value,
+        Err(e) => serde_json::json!({ "error": format!("Compression error: {}", e) }),
+    }
+}
+
+pub async fn compress_project(pool: &sqlx::PgPool, payload: Value) -> Value {
+    match build_recursive_summary(pool, "project", &payload).await {
+        Ok(value) => value,
+        Err(e) => serde_json::json!({ "error": format!("Compression error: {}", e) }),
+    }
+}
+
+pub async fn derive_memory(pool: &sqlx::PgPool, payload: Value) -> Value {
+    let filters = ScopedMemoryFilters::from_payload(&payload);
+    if !filters.has_required_scope_filter() {
+        return scope_error_response(REQUIRED_SCOPE_ERROR);
+    }
+
+    let level = payload
+        .get("level")
+        .and_then(|value| value.as_str())
+        .unwrap_or("all");
+    let force = payload
+        .get("force")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+
+    let seed = DerivationSeed {
+        user_id: filters.user_id.clone().unwrap_or_default(),
+        tenant_id: filters
+            .tenant_id
+            .clone()
+            .unwrap_or_else(|| "default".to_string()),
+        app_id: filters.app_id.clone().unwrap_or_else(|| "os".to_string()),
+        session_id: filters.session_id.clone().unwrap_or_default(),
+        scope: filters
+            .scope
+            .clone()
+            .unwrap_or_else(|| "personal".to_string()),
+        source: "manual_derivation".to_string(),
+        wing: filters.wing.clone().unwrap_or_default(),
+        hall: filters.hall.clone().unwrap_or_default(),
+        room: filters.room.clone().unwrap_or_default(),
+        memory_type: payload
+            .get("memory_type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("event")
+            .to_string(),
+        derivation_method: Some("manual_derivation".to_string()),
+    };
+
+    let derived = match level {
+        "session" => {
+            let payload = derivation_filters("session", &seed);
+            build_recursive_summary(pool, "session", &payload)
+                .await
+                .map(|value| vec![value])
+        }
+        "room" => {
+            let payload = derivation_filters("room", &seed);
+            build_recursive_summary(pool, "room", &payload)
+                .await
+                .map(|value| vec![value])
+        }
+        "project" => {
+            let payload = derivation_filters("project", &seed);
+            build_recursive_summary(pool, "project", &payload)
+                .await
+                .map(|value| vec![value])
+        }
+        _ => Ok(maybe_run_continuous_derivation(pool, &seed, force).await),
+    };
+
+    match derived {
+        Ok(entries) => serde_json::json!({
+            "status": "success",
+            "level": level,
+            "derived": entries
+        }),
+        Err(e) => serde_json::json!({ "error": format!("Derivation error: {}", e) }),
+    }
+}
+
+pub async fn recall_recursive_context(pool: &sqlx::PgPool, payload: Value) -> Value {
+    if let Some(cached) = maybe_cached("recall_recursive_context", &payload) {
+        return cached;
+    }
+
+    let filters = ScopedMemoryFilters::from_payload(&payload);
+    if !filters.has_required_scope_filter() {
+        return scope_error_response(REQUIRED_SCOPE_ERROR);
+    }
+
+    let summary_filters = filters.clone();
+    let summary_rows = match fetch_scoped_rows(
+        pool,
+        &summary_filters,
+        60,
+        "timestamp DESC",
+        &[
+            "status = 'active'",
+            "(expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)",
+            "(memory_type IN ('summary', 'working_summary') OR tags_json ILIKE '%summary%')",
+        ],
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => return serde_json::json!({ "error": format!("Query error: {}", e) }),
+    };
+
+    let mut session_summaries = Vec::new();
+    let mut room_summaries = Vec::new();
+    let mut project_summaries = Vec::new();
+    let mut touched_ids = Vec::new();
+
+    for row in &summary_rows {
+        let tags = row_tags(row);
+        let entry = scoped_memory_row_to_json(row);
+        if has_any_tag(&tags, &["session_summary"]) && session_summaries.len() < 3 {
+            touched_ids.push(row.get::<i32, _>("id"));
+            session_summaries.push(entry);
+            continue;
+        }
+        if has_any_tag(&tags, &["room_summary"]) && room_summaries.len() < 3 {
+            touched_ids.push(row.get::<i32, _>("id"));
+            room_summaries.push(entry);
+            continue;
+        }
+        if has_any_tag(&tags, &["project_summary"]) && project_summaries.len() < 3 {
+            touched_ids.push(row.get::<i32, _>("id"));
+            project_summaries.push(entry);
+        }
+    }
+
+    let working_context = get_working_context(pool, payload.clone()).await;
+    let durable_facts = get_durable_facts(pool, payload.clone()).await;
+    let recent_events = get_recent_events(pool, payload.clone()).await;
+
+    if !touched_ids.is_empty() {
+        let _ = touch_usage(pool, &touched_ids).await;
+    }
+
+    let response = serde_json::json!({
+        "status": "success",
+        "retrieval_strategy": "recursive_context",
+        "recursive_context": {
+            "project_summaries": project_summaries,
+            "room_summaries": room_summaries,
+            "session_summaries": session_summaries,
+            "working_context": working_context.get("working_context").cloned().unwrap_or(Value::Null),
+            "durable_facts": durable_facts.get("entries").cloned().unwrap_or(Value::Array(Vec::new())),
+            "recent_events": recent_events.get("entries").cloned().unwrap_or(Value::Array(Vec::new()))
+        }
+    });
+    store_cache("recall_recursive_context", &payload, &response);
+    response
+}
+
 pub async fn search_records(pool: &sqlx::PgPool, payload: Value) -> Value {
     let filters = ScopedMemoryFilters::from_payload(&payload);
     let query_text = payload
@@ -1101,13 +1806,15 @@ pub async fn search_records(pool: &sqlx::PgPool, payload: Value) -> Value {
                         &query_tokens,
                         recency_rank,
                         total_candidates,
-                        &content,
-                        &entry_title,
-                        &memory_type_value,
-                        &wing_value,
-                        &hall_value,
-                        &room_value,
-                        &tags,
+                        ScopedMemoryCandidateView {
+                            content: &content,
+                            entry_title: &entry_title,
+                            memory_type: &memory_type_value,
+                            wing: &wing_value,
+                            hall: &hall_value,
+                            room: &room_value,
+                            tags: &tags,
+                        },
                     );
 
                     if overlap_hits == 0 {
@@ -1131,7 +1838,7 @@ pub async fn search_records(pool: &sqlx::PgPool, payload: Value) -> Value {
                         memory_type: memory_type_value,
                         content,
                         tags,
-                        confidence: row.get("confidence"),
+                        confidence: row_confidence(row),
                         status: row.get("status"),
                         timestamp: row_timestamp_string(row, "timestamp"),
                         score,
@@ -1340,7 +2047,7 @@ pub async fn memory_promote(pool: &sqlx::PgPool, payload: Value) -> Value {
             "memory_type": target_memory_type,
             "content": content,
             "tags": tags,
-            "confidence": source.get::<Option<f64>, _>("confidence").unwrap_or(0.8),
+            "confidence": row_confidence(source).unwrap_or(0.8),
             "derivation_method": promotion_reason,
             "promoted_from": serde_json::json!([source_id]).to_string(),
             "content_json": row_content_json(source)
@@ -1461,7 +2168,9 @@ mod tests {
             .trim()
             .to_string();
 
-        let db_url = format!("postgresql://{user}:{password}@127.0.0.1:{host_port}/{database}");
+        let db_url = format!(
+            "postgresql://{user}:{password}@127.0.0.1:{host_port}/{database}?sslmode=disable"
+        );
 
         let mut ready = false;
         for _ in 0..30 {
@@ -1517,6 +2226,7 @@ mod tests {
                     if error_text.contains("Connection refused")
                         || error_text.contains("Connection reset by peer")
                         || error_text.contains("the database system is starting up")
+                        || error_text.contains("unexpected response from SSLRequest")
                     {
                         thread::sleep(Duration::from_millis(500));
                         continue;
@@ -1757,5 +2467,50 @@ mod tests {
         assert!(after
             .get::<Option<chrono::NaiveDateTime>, _>("last_used_at")
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn saving_enough_events_triggers_automatic_session_derivation() {
+        let (pool, _container) = test_pool().await;
+
+        for idx in 0..6 {
+            let saved = save_record(
+                &pool,
+                serde_json::json!({
+                    "user_id": "user-derived",
+                    "app_id": "vetra",
+                    "session_id": "session-derived",
+                    "scope": "workspace",
+                    "wing": "vetra",
+                    "hall": "contracts",
+                    "room": "msa",
+                    "memory_type": "event",
+                    "content": format!("Negotiation event {}", idx)
+                }),
+            )
+            .await;
+            assert_eq!(saved["status"], "success", "save_record failed: {}", saved);
+        }
+
+        let result = query_records(
+            &pool,
+            serde_json::json!({
+                "user_id": "user-derived",
+                "app_id": "vetra",
+                "session_id": "session-derived",
+                "memory_type": "working_summary"
+            }),
+        )
+        .await;
+
+        let entries = result["entries"].as_array().unwrap();
+        assert!(
+            entries.iter().any(|entry| {
+                let tags = entry["tags"].as_array().cloned().unwrap_or_default();
+                tags.iter().any(|tag| tag == "session_summary")
+            }),
+            "expected an automatically derived session_summary entry: {}",
+            result
+        );
     }
 }
