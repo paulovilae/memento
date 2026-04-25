@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
     // 4. Initialize Memory Database
     let db_pool = schema::init_db()
         .await
-        .expect("Failed to initialize SQLite database");
+        .expect("Failed to initialize Memento Postgres database");
     info!("💾 Memory database initialized");
 
     // 4b. Initialize Knowledge Store table

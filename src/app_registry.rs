@@ -6,6 +6,8 @@ use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::{Column, Row};
 use std::collections::HashMap;
 use std::path::Path;
+use std::str::FromStr;
+use std::time::Duration;
 use tracing::{error, info, warn};
 
 /// A single app entry in etc/apps.toml
@@ -132,32 +134,42 @@ pub async fn discover_apps(os_root: &str) -> HashMap<String, AppConnection> {
         };
 
         // Connect to the app's database
-        match PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&db_url)
-            .await
-        {
-            Ok(pool) => {
-                info!(
-                    "  ✅ {} — connected to Postgres via {}",
-                    manifest.app.name, db_config.url_env
+        let connect_options = match sqlx::postgres::PgConnectOptions::from_str(&db_url) {
+            Ok(options) => options.application_name(&format!("memento-app-{}", entry.slug)),
+            Err(error) => {
+                error!(
+                    "  ❌ {} — invalid database URL: {}",
+                    manifest.app.name, error
                 );
-                connections.insert(
-                    entry.slug.clone(),
-                    AppConnection {
-                        name: manifest.app.name,
-                        slug: manifest.app.slug,
-                        description: manifest.app.description,
-                        schema_prefix: db_config.schema_prefix.clone().unwrap_or_default(),
-                        key_tables: db_config.key_tables.clone().unwrap_or_default(),
-                        pool,
-                    },
-                );
+                continue;
             }
-            Err(e) => {
-                error!("  ❌ {} — failed to connect: {}", manifest.app.name, e);
-            }
-        }
+        };
+
+        // Keep app pools lazy so Memento does not pre-consume Postgres connections
+        // for every registered app on startup. The pool will open on first actual query.
+        let pool = PgPoolOptions::new()
+            .min_connections(0)
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(3))
+            .idle_timeout(Duration::from_secs(30))
+            .max_lifetime(Duration::from_secs(60 * 5))
+            .connect_lazy_with(connect_options);
+
+        info!(
+            "  ✅ {} — registered lazy Postgres pool via {}",
+            manifest.app.name, db_config.url_env
+        );
+        connections.insert(
+            entry.slug.clone(),
+            AppConnection {
+                name: manifest.app.name,
+                slug: manifest.app.slug,
+                description: manifest.app.description,
+                schema_prefix: db_config.schema_prefix.clone().unwrap_or_default(),
+                key_tables: db_config.key_tables.clone().unwrap_or_default(),
+                pool,
+            },
+        );
     }
 
     info!("🔗 Connected to {} app databases", connections.len());
