@@ -1,6 +1,7 @@
 /// App Registry — reads OS/etc/apps.toml and provides database connections
 /// to external app databases (Movilo, Vetra, Latinos, etc.)
 use serde::Deserialize;
+use bigdecimal::ToPrimitive;
 use serde_json::{Map, Value};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::{Column, Row};
@@ -197,6 +198,12 @@ fn row_to_json(row: &sqlx::postgres::PgRow) -> Value {
             obj.insert(name.to_string(), serde_json::json!(v));
         } else if let Ok(v) = row.try_get::<f32, _>(name) {
             obj.insert(name.to_string(), serde_json::json!(v));
+        } else if let Ok(v) = row.try_get::<bigdecimal::BigDecimal, _>(name) {
+            let json_value = v
+                .to_f64()
+                .map(|number| serde_json::json!(number))
+                .unwrap_or_else(|| serde_json::json!(v.to_string()));
+            obj.insert(name.to_string(), json_value);
         } else if let Ok(v) = row.try_get::<bool, _>(name) {
             obj.insert(name.to_string(), serde_json::json!(v));
         } else if let Ok(v) = row.try_get::<chrono::DateTime<chrono::Utc>, _>(name) {

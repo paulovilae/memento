@@ -32,8 +32,9 @@ qdrant-client = "1.9"
 # Semantic Graph / JSON (Relational/Fact Memory)
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "postgres", "json", "chrono"] }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "postgres", "json", "chrono", "bigdecimal"] }
 chrono = { version = "0.4", features = ["serde"] }
+bigdecimal = "0.4"
 
 # Error Handling & Utilities
 anyhow = "1.0"
