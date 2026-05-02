@@ -2,8 +2,14 @@
 ///
 /// Inspired by ContextKeep's memory model but implemented natively in Rust
 /// with SQLite storage and UDS IPC transport.
-use sqlx::Row;
+use sqlx::{postgres::PgRow, Row};
 use tracing::{error, info};
+
+fn timestamp_string(row: &PgRow, column: &str) -> String {
+    row.try_get::<chrono::NaiveDateTime, _>(column)
+        .map(|timestamp| timestamp.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_default()
+}
 
 /// Creates the `knowledge_store` table if it doesn't exist.
 pub async fn init_knowledge_table(pool: &sqlx::PgPool) -> anyhow::Result<()> {
@@ -73,8 +79,8 @@ pub async fn get(pool: &sqlx::PgPool, key: &str) -> serde_json::Value {
         Ok(Some(row)) => {
             let content: String = row.get("content");
             let tags: String = row.get("tags");
-            let created_at: String = row.get("created_at");
-            let updated_at: String = row.get("updated_at");
+            let created_at = timestamp_string(&row, "created_at");
+            let updated_at = timestamp_string(&row, "updated_at");
             serde_json::json!({
                 "status": "success",
                 "key": key,
@@ -114,7 +120,7 @@ pub async fn list(pool: &sqlx::PgPool) -> serde_json::Value {
                     let key: String = row.get("key");
                     let content: String = row.get("content");
                     let tags: String = row.get("tags");
-                    let updated_at: String = row.get("updated_at");
+                    let updated_at = timestamp_string(row, "updated_at");
                     // Title = first 80 chars of content, trimmed at word boundary
                     let title = if content.len() <= 80 {
                         content.clone()
@@ -208,7 +214,7 @@ pub async fn search(pool: &sqlx::PgPool, query: &str) -> serde_json::Value {
             let key: String = row.get("key");
             let content: String = row.get("content");
             let tags: String = row.get("tags");
-            let updated_at: String = row.get("updated_at");
+            let updated_at = timestamp_string(&row, "updated_at");
 
             let snippet = if content.len() <= 200 {
                 content.clone()

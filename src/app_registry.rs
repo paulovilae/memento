@@ -1,7 +1,7 @@
+use bigdecimal::ToPrimitive;
 /// App Registry — reads OS/etc/apps.toml and provides database connections
 /// to external app databases (Movilo, Vetra, Latinos, etc.)
 use serde::Deserialize;
-use bigdecimal::ToPrimitive;
 use serde_json::{Map, Value};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::{Column, Row};
