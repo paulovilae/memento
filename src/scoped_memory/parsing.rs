@@ -42,6 +42,8 @@ pub(super) struct SaveRecordInput {
     pub(super) usage_count: i32,
     pub(super) last_used_at: Option<String>,
     pub(super) promoted_from: Option<String>,
+    /// JSON-encoded f32 embedding vector, or None if not provided by the caller.
+    pub(super) embedding: Option<String>,
 }
 
 impl SaveRecordInput {
@@ -163,6 +165,10 @@ impl SaveRecordInput {
                 .get("promoted_from")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
+            embedding: payload
+                .get("embedding")
+                .filter(|v| v.is_array())
+                .map(|v| v.to_string()),
         })
     }
 
@@ -187,7 +193,7 @@ pub(super) async fn insert_record_only(
     pool: &sqlx::PgPool,
     input: &SaveRecordInput,
 ) -> Result<i32, sqlx::Error> {
-    sqlx::query_scalar::<_, i32>("INSERT INTO scoped_memory (user_id, tenant_id, app_id, expert_id, session_id, device_id, scope, source, wing, hall, room, entry_title, memory_type, content, tags_json, content_json, confidence, provenance_refs, derivation_method, status, expires_at, usage_count, last_used_at, promoted_from) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, CAST($21 AS TIMESTAMP), $22, CAST($23 AS TIMESTAMP), $24) RETURNING id")
+    sqlx::query_scalar::<_, i32>("INSERT INTO scoped_memory (user_id, tenant_id, app_id, expert_id, session_id, device_id, scope, source, wing, hall, room, entry_title, memory_type, content, tags_json, content_json, confidence, provenance_refs, derivation_method, status, expires_at, usage_count, last_used_at, promoted_from, embedding) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, CAST($21 AS TIMESTAMP), $22, CAST($23 AS TIMESTAMP), $24, $25) RETURNING id")
         .bind(&input.user_id)
         .bind(&input.tenant_id)
         .bind(&input.app_id)
@@ -225,6 +231,7 @@ pub(super) async fn insert_record_only(
         .bind(input.usage_count)
         .bind(input.last_used_at.as_deref())
         .bind(input.promoted_from.as_deref())
+        .bind(input.embedding.as_deref())
         .fetch_one(pool)
         .await
 }

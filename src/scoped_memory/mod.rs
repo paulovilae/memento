@@ -534,6 +534,129 @@ pub async fn recall_recursive_context(pool: &sqlx::PgPool, payload: Value) -> Va
     response
 }
 
+/// Cosine similarity between two equal-length f32 vectors. Vectors from Hera's
+/// embed action arrive L2-normalized, so this reduces to a dot product, but we
+/// compute the full cosine for robustness against unnormalized callers.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let mut dot = 0.0f32;
+    let mut na = 0.0f32;
+    let mut nb = 0.0f32;
+    for i in 0..a.len() {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
+fn parse_embedding(raw: &str) -> Option<Vec<f32>> {
+    let parsed: Vec<f32> = serde_json::from_str(raw).ok()?;
+    if parsed.is_empty() {
+        None
+    } else {
+        Some(parsed)
+    }
+}
+
+/// Semantic recall: given a `query_embedding`, rerank the caller's scope-filtered
+/// rows by cosine similarity and return the top-k. Filtering by scope first keeps
+/// the candidate set small (tens to hundreds of rows), so a brute-force cosine in
+/// Rust needs no ANN index or pgvector extension.
+pub async fn semantic_recall(pool: &sqlx::PgPool, payload: Value) -> Value {
+    let filters = ScopedMemoryFilters::from_payload(&payload);
+    if !filters.has_required_scope_filter() {
+        return scope_error_response(REQUIRED_SCOPE_ERROR);
+    }
+
+    let query_embedding: Vec<f32> = match payload.get("query_embedding").and_then(|v| v.as_array())
+    {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_f64().map(|f| f as f32))
+            .collect(),
+        None => return serde_json::json!({ "error": "Missing 'query_embedding' array in payload" }),
+    };
+    if query_embedding.is_empty() {
+        return serde_json::json!({ "error": "Empty 'query_embedding'" });
+    }
+
+    let limit = clamp_i64(payload.get("limit").and_then(|v| v.as_i64()).unwrap_or(6), 1, 24);
+    // Pull a bounded candidate window (already scope-filtered) to rerank.
+    let candidate_cap = clamp_i64(
+        payload
+            .get("candidate_cap")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(400),
+        24,
+        2000,
+    );
+    let min_score = payload
+        .get("min_score")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.25) as f32;
+
+    let (where_clause, bind_values) = filters.build_where_clause();
+    let sql = format!(
+        "SELECT id, content, memory_type, entry_title, timestamp, embedding \
+         FROM scoped_memory \
+         WHERE {} AND embedding IS NOT NULL AND status = 'active' \
+         AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP) \
+         ORDER BY timestamp DESC LIMIT {}",
+        where_clause, candidate_cap
+    );
+    let mut query = sqlx::query(&sql);
+    for val in &bind_values {
+        query = query.bind(val);
+    }
+    let rows = match query.fetch_all(pool).await {
+        Ok(rows) => rows,
+        Err(e) => return serde_json::json!({ "error": format!("Query error: {}", e) }),
+    };
+
+    let mut scored: Vec<(f32, Value)> = Vec::new();
+    for row in &rows {
+        let raw: Option<String> = row.get("embedding");
+        let Some(raw) = raw else { continue };
+        let Some(vec) = parse_embedding(&raw) else {
+            continue;
+        };
+        let score = cosine_similarity(&query_embedding, &vec);
+        if score < min_score {
+            continue;
+        }
+        let content: String = row.get("content");
+        let entry = serde_json::json!({
+            "id": row.get::<i32, _>("id"),
+            "memory_type": row.get::<String, _>("memory_type"),
+            "entry_title": row.get::<String, _>("entry_title"),
+            "content": content,
+            "score": score,
+        });
+        scored.push((score, entry));
+    }
+
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let entries: Vec<Value> = scored
+        .into_iter()
+        .take(limit as usize)
+        .map(|(_, e)| e)
+        .collect();
+
+    serde_json::json!({
+        "status": "success",
+        "retrieval_strategy": "semantic_cosine",
+        "count": entries.len(),
+        "candidates_scanned": rows.len(),
+        "entries": entries
+    })
+}
+
 pub async fn search_records(pool: &sqlx::PgPool, payload: Value) -> Value {
     let filters = ScopedMemoryFilters::from_payload(&payload);
     let query_text = payload

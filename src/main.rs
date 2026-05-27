@@ -316,6 +316,7 @@ async fn process_uds_stream(
             "recall_recursive_context" => {
                 scoped_memory::recall_recursive_context(&pool, req.payload).await
             }
+            "semantic_recall" => scoped_memory::semantic_recall(&pool, req.payload).await,
 
             // ─── Virtual Office: Audit Log ─────────────────────────────
             "audit_log" => audit::audit_log(&pool, req.payload).await,

@@ -428,6 +428,22 @@ async fn migration_7_audit_chain(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn migration_8_scoped_embedding(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    // Semantic recall: JSON-encoded f32 vector (e.g. 384-dim multilingual MiniLM).
+    // Stored as TEXT to avoid a pgvector dependency; cosine rerank happens in Rust
+    // over the already scope-filtered candidate rows.
+    ensure_pg_column(pool, "scoped_memory", "embedding", "TEXT").await?;
+    // Performance: scope-filtered recall/query was doing sequential scans (6-14s
+    // observed). Index the common scope filter + recency order.
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_scoped_memory_scope_time \
+         ON scoped_memory (user_id, app_id, session_id, timestamp DESC)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn run_all(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     ensure_migrations_table(pool).await?;
 
@@ -444,6 +460,13 @@ pub async fn run_all(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     run_migration(pool, 5, "audit_and_bio", migration_5_audit_and_bio(pool)).await?;
     run_migration(pool, 6, "document_index", migration_6_document_index(pool)).await?;
     run_migration(pool, 7, "audit_chain", migration_7_audit_chain(pool)).await?;
+    run_migration(
+        pool,
+        8,
+        "scoped_embedding",
+        migration_8_scoped_embedding(pool),
+    )
+    .await?;
 
     Ok(())
 }
