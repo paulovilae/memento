@@ -22,6 +22,7 @@ mod knowledge;
 mod metrics;
 mod migrations;
 mod query_cache;
+pub mod recall_telemetry;
 mod runtime_memory;
 mod schema;
 mod scoped_memory;
@@ -317,6 +318,7 @@ async fn process_uds_stream(
                 scoped_memory::recall_recursive_context(&pool, req.payload).await
             }
             "semantic_recall" => scoped_memory::semantic_recall(&pool, req.payload).await,
+            "recall_feedback" => recall_telemetry::recall_feedback(&pool, req.payload).await,
 
             // ─── Virtual Office: Audit Log ─────────────────────────────
             "audit_log" => audit::audit_log(&pool, req.payload).await,

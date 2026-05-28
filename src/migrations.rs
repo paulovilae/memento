@@ -444,6 +444,63 @@ async fn migration_8_scoped_embedding(pool: &sqlx::PgPool) -> anyhow::Result<()>
     Ok(())
 }
 
+async fn migration_9_recall_telemetry(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    // Flywheel data for embedder reranker fine-tune: each semantic_recall call
+    // writes a recall_log row; later, Hera (or any caller) reports back which
+    // returned ids were actually cited via recall_feedback. Joined on request_id,
+    // these pairs become (query, positives, negatives) training tuples.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS recall_log (
+            id BIGSERIAL PRIMARY KEY,
+            request_id TEXT NOT NULL,
+            app_id TEXT NOT NULL DEFAULT 'os',
+            user_id TEXT,
+            tenant_id TEXT,
+            session_id TEXT,
+            query_text TEXT,
+            query_embedding TEXT NOT NULL,
+            returned_ids JSONB NOT NULL,
+            candidates_scanned INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_recall_log_request_id ON recall_log (request_id)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_recall_log_created_at ON recall_log (created_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS recall_feedback (
+            id BIGSERIAL PRIMARY KEY,
+            request_id TEXT NOT NULL,
+            cited_ids JSONB NOT NULL,
+            feedback_kind TEXT NOT NULL DEFAULT 'cited',
+            notes TEXT,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_recall_feedback_request_id ON recall_feedback (request_id)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn run_all(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     ensure_migrations_table(pool).await?;
 
@@ -465,6 +522,13 @@ pub async fn run_all(pool: &sqlx::PgPool) -> anyhow::Result<()> {
         8,
         "scoped_embedding",
         migration_8_scoped_embedding(pool),
+    )
+    .await?;
+    run_migration(
+        pool,
+        9,
+        "recall_telemetry",
+        migration_9_recall_telemetry(pool),
     )
     .await?;
 
