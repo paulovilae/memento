@@ -89,8 +89,13 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 6. Setup Unix Domain Socket (UDS) for Zero-Copy IPC with Hera/Imaginclaw
-    let socket_path = "/tmp/memento.sock";
+    // 6. Setup Unix Domain Socket (UDS) for Zero-Copy IPC with Hera/Imaginclaw.
+    // Default is `/tmp/memento.sock` (what every client hardcodes); tests/dev can
+    // point to a private path via MEMENTO_SOCKET_PATH so they don't clobber a
+    // running production daemon on the same machine.
+    let socket_path_owned = std::env::var("MEMENTO_SOCKET_PATH")
+        .unwrap_or_else(|_| "/tmp/memento.sock".to_string());
+    let socket_path = socket_path_owned.as_str();
 
     // Clean up old socket if it exists
     if Path::new(socket_path).exists() {
