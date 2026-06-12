@@ -501,6 +501,16 @@ async fn migration_9_recall_telemetry(pool: &sqlx::PgPool) -> anyhow::Result<()>
     Ok(())
 }
 
+async fn migration_10_scoped_embedding_bytea(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    // Recall fast-path: store the f32 vector as raw little-endian BYTEA alongside the
+    // existing TEXT (JSON) column. `semantic_recall` prefers BYTEA and skips the
+    // per-candidate `serde_json::from_str` (up to candidate_cap=400 parses/recall on
+    // Hera's hot path). The TEXT column is kept for backward/rollback compatibility and
+    // for rows written before this migration (those fall back to the TEXT parse).
+    ensure_pg_column(pool, "scoped_memory", "embedding_b", "BYTEA").await?;
+    Ok(())
+}
+
 pub async fn run_all(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     ensure_migrations_table(pool).await?;
 
@@ -529,6 +539,13 @@ pub async fn run_all(pool: &sqlx::PgPool) -> anyhow::Result<()> {
         9,
         "recall_telemetry",
         migration_9_recall_telemetry(pool),
+    )
+    .await?;
+    run_migration(
+        pool,
+        10,
+        "scoped_embedding_bytea",
+        migration_10_scoped_embedding_bytea(pool),
     )
     .await?;
 

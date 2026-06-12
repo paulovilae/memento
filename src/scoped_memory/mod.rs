@@ -564,6 +564,39 @@ fn parse_embedding(raw: &str) -> Option<Vec<f32>> {
     }
 }
 
+/// Fast-path decode of the BYTEA embedding column: raw little-endian f32, 4 bytes each.
+/// Returns None for empty/misaligned bytes so the caller can fall back to the TEXT column.
+fn unpack_embedding(bytes: &[u8]) -> Option<Vec<f32>> {
+    if bytes.is_empty() || bytes.len() % 4 != 0 {
+        return None;
+    }
+    Some(
+        bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+mod embedding_bytea_tests {
+    use super::*;
+
+    #[test]
+    fn pack_unpack_roundtrip() {
+        let v = vec![1.0f32, -0.5, 0.25, 0.0, 123.456];
+        let bytes = super::parsing::pack_embedding(&v);
+        assert_eq!(bytes.len(), v.len() * 4);
+        assert_eq!(unpack_embedding(&bytes).expect("roundtrip"), v);
+    }
+
+    #[test]
+    fn unpack_rejects_bad_input() {
+        assert!(unpack_embedding(&[]).is_none());
+        assert!(unpack_embedding(&[1, 2, 3]).is_none()); // not a multiple of 4
+    }
+}
+
 /// Semantic recall: given a `query_embedding`, rerank the caller's scope-filtered
 /// rows by cosine similarity and return the top-k. Filtering by scope first keeps
 /// the candidate set small (tens to hundreds of rows), so a brute-force cosine in
@@ -618,7 +651,7 @@ pub async fn semantic_recall(pool: &sqlx::PgPool, payload: Value) -> Value {
 
     let (where_clause, bind_values) = filters.build_where_clause();
     let sql = format!(
-        "SELECT id, content, memory_type, entry_title, timestamp, embedding \
+        "SELECT id, content, memory_type, entry_title, timestamp, embedding, embedding_b \
          FROM scoped_memory \
          WHERE {} AND embedding IS NOT NULL AND status = 'active' \
          AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP) \
@@ -636,10 +669,22 @@ pub async fn semantic_recall(pool: &sqlx::PgPool, payload: Value) -> Value {
 
     let mut scored: Vec<(f32, Value)> = Vec::new();
     for row in &rows {
-        let raw: Option<String> = row.get("embedding");
-        let Some(raw) = raw else { continue };
-        let Some(vec) = parse_embedding(&raw) else {
-            continue;
+        // Prefer the BYTEA fast-path (zero JSON parse); fall back to the TEXT column
+        // for rows written before migration 10.
+        let vec = match row
+            .get::<Option<Vec<u8>>, _>("embedding_b")
+            .as_deref()
+            .and_then(unpack_embedding)
+        {
+            Some(v) => v,
+            None => {
+                let raw: Option<String> = row.get("embedding");
+                let Some(raw) = raw else { continue };
+                let Some(v) = parse_embedding(&raw) else {
+                    continue;
+                };
+                v
+            }
         };
         let score = cosine_similarity(&query_embedding, &vec);
         if score < min_score {
