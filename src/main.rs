@@ -325,6 +325,20 @@ async fn process_uds_stream(
             "semantic_recall" => scoped_memory::semantic_recall(&pool, req.payload).await,
             "recall_feedback" => recall_telemetry::recall_feedback(&pool, req.payload).await,
 
+            "delete_scoped_memory" => {
+                // Accept both { "ids": [1,2,3] } and { "id": 1 }; normalise to Vec<i32>.
+                let ids: Vec<i32> = if let Some(arr) = req.payload.get("ids").and_then(|v| v.as_array()) {
+                    arr.iter()
+                        .filter_map(|v| v.as_i64().map(|n| n as i32))
+                        .collect()
+                } else if let Some(single) = req.payload.get("id").and_then(|v| v.as_i64()) {
+                    vec![single as i32]
+                } else {
+                    Vec::new()
+                };
+                scoped_memory::delete_records(&pool, ids).await
+            }
+
             // ─── Virtual Office: Audit Log ─────────────────────────────
             "audit_log" => audit::audit_log(&pool, req.payload).await,
             "get_metrics" => metrics::get_metrics(),

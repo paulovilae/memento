@@ -1,8 +1,11 @@
 // Module declarations
+mod deletion;
 mod embedding;
 mod helpers;
 mod parsing;
 mod derivation;
+
+pub use deletion::delete_records;
 
 // Import internal types and functions
 use embedding::{cosine_similarity, parse_embedding, unpack_embedding};

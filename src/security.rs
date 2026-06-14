@@ -227,6 +227,11 @@ impl SecurityConfig {
                 }
                 Ok(())
             }
+            // Borrado destructivo — restringido a clientes privilegiados (hera, os-v3).
+            "delete_scoped_memory" => {
+                self.authenticate_client(client, &self.privileged_clients, action)?;
+                Ok(())
+            }
             // Acciones conocidas de contexto / lectura / telemetría — permitidas
             // (lectura scope-filtered por SQL; preserva el comportamiento intencional
             // que antes caía al default abierto).
