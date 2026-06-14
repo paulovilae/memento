@@ -227,8 +227,9 @@ impl SecurityConfig {
                 }
                 Ok(())
             }
-            // Borrado destructivo — restringido a clientes privilegiados (hera, os-v3).
-            "delete_scoped_memory" => {
+            // Borrado destructivo + estadísticas cross-app (revelan estructura de
+            // todos los apps) — restringido a clientes privilegiados (hera, os-v3).
+            "delete_scoped_memory" | "scoped_memory_app_stats" => {
                 self.authenticate_client(client, &self.privileged_clients, action)?;
                 Ok(())
             }

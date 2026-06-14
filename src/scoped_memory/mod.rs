@@ -4,8 +4,10 @@ mod embedding;
 mod helpers;
 mod parsing;
 mod derivation;
+mod stats;
 
 pub use deletion::delete_records;
+pub use stats::app_stats;
 
 // Import internal types and functions
 use embedding::{cosine_similarity, parse_embedding, unpack_embedding};

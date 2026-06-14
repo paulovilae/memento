@@ -339,6 +339,8 @@ async fn process_uds_stream(
                 scoped_memory::delete_records(&pool, ids).await
             }
 
+            "scoped_memory_app_stats" => scoped_memory::app_stats(&pool).await,
+
             // ─── Virtual Office: Audit Log ─────────────────────────────
             "audit_log" => audit::audit_log(&pool, req.payload).await,
             "get_metrics" => metrics::get_metrics(),
