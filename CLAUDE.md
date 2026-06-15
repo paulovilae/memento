@@ -166,17 +166,18 @@ Implication: **deploying a Memento change is `pm2 restart`, not `scp` of a binar
 
 ---
 
-## Per-node topology — every node has its own memento-node
+## Topology — single primary on genesis + hot standby on anchor (verified 2026-06-15)
 
-Despite the patent text describing Memento as "primary-only singleton", each edge node (anchor, atlas, backup as configured) actually runs its **own** `memento-node` with its own `/tmp/memento.sock` and its own Postgres database. There is no cross-node sync between memento-nodes today.
+There is **one** `memento-node` running, on **genesis** (`/tmp/memento.sock`, Postgres DB `acciona_db`). Its database is **streamed to anchor by physical Postgres replication** (slot `anchor_slot`, async, ~60 ms lag, RPO ≈ 0). anchor's Postgres is a **read-only standby** (`pg_is_in_recovery = true`) and currently runs **no** `memento-node` (no socket, no process).
 
-Consequence:
+Consequence (current reality):
 
-- A turn saved by Hera on **genesis** lives in genesis's Memento.
-- A turn saved by Hera on **anchor** lives in anchor's Memento.
-- They do not see each other's events.
+- A turn saved by Hera on genesis is written to genesis's `acciona_db` **and replicated to anchor within ~60 ms** — anchor holds an identical, near-real-time copy.
+- anchor does not accept Memento writes (standby), so it produces **no divergent data**; nothing unique can be lost if anchor goes down.
+- If **genesis** dies, all Memento data survives on anchor's standby (RPO ≈ 0). **Failover is MANUAL**: promote anchor's standby to primary and start a `memento-node` there (`anchor.ecosystem.config.cjs` defines the block; it is not running while genesis is primary). Runbook: `docs/DB_FAILOVER_RUNBOOK.md`.
+- Async replication means a sudden genesis crash can lose the last few ms of writes — fine for chat memory.
 
-This is fine for the current product split (Telegram bots → genesis; `paulovila.org` web traffic → anchor), but **don't assume `semantic_recall` on one node returns the other node's data**. A unified Memento mesh would be a larger architectural project.
+> ⚠️ **SUPERSEDED:** the earlier design ("each edge node runs its own independent `memento-node` with its own Postgres; no cross-node sync; nodes don't see each other's events") was replaced by the genesis→anchor streaming replication set up **2026-06-06**. Do not reason from the old model. `semantic_recall` on the live (genesis) node sees the full store; anchor is a replica of the same data, not a separate island.
 
 ---
 
