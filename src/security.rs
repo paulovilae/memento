@@ -227,7 +227,30 @@ impl SecurityConfig {
                 }
                 Ok(())
             }
-            _ => Ok(()),
+            // Borrado destructivo + estadísticas cross-app (revelan estructura de
+            // todos los apps) — restringido a clientes privilegiados (hera, os-v3).
+            "delete_scoped_memory" | "scoped_memory_app_stats" => {
+                self.authenticate_client(client, &self.privileged_clients, action)?;
+                Ok(())
+            }
+            // Acciones conocidas de contexto / lectura / telemetría — permitidas
+            // (lectura scope-filtered por SQL; preserva el comportamiento intencional
+            // que antes caía al default abierto).
+            "clear_context"
+            | "get_context"
+            | "get_context_profile"
+            | "get_user_prior"
+            | "save_user_prior"
+            | "log_interaction"
+            | "recall_feedback"
+            | "record_context_feedback"
+            | "semantic_recall"
+            | "vector_search"
+            | "save_memory" => Ok(()),
+            // Fail-closed: cualquier acción NO listada explícitamente se DENIEGA.
+            // Antes `_ => Ok(())` dejaba abierta sin auth toda acción nueva que se
+            // añadiera al dispatcher. Si agregas una acción nueva, lístala arriba.
+            other => Err(format!("unauthorized: unknown action '{other}'")),
         }
     }
 }

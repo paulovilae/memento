@@ -17,7 +17,7 @@ struct AppRegistryEntry {
     slug: String,
     #[allow(dead_code)]
     path: String,
-    manifest: String,
+    manifest: Option<String>,
 }
 
 /// The full etc/apps.toml file
@@ -88,7 +88,10 @@ pub async fn discover_apps(os_root: &str) -> HashMap<String, AppConnection> {
     info!("📋 Found {} apps in registry", registry.apps.len());
 
     for entry in registry.apps {
-        let manifest_path = format!("{}/{}", os_root, entry.manifest);
+        let Some(manifest_file) = entry.manifest else {
+            continue;
+        };
+        let manifest_path = format!("{}/{}", os_root, manifest_file);
         if !Path::new(&manifest_path).exists() {
             warn!("⚠️ Manifest not found: {}", manifest_path);
             continue;
@@ -248,6 +251,52 @@ pub fn list_apps_json(apps: &HashMap<String, AppConnection>) -> Value {
     serde_json::json!({ "status": "success", "apps": app_list })
 }
 
+/// Rewrites cartera SQL queries so LLM-generated "General" company filters
+/// (e.g. company_name = 'empresa general', d.company_name = 'General') become
+/// the correct NULL-based filter. The "General" group in the UI represents
+/// debtors with no company assigned (NULL in company_name).
+fn rewrite_cartera_query(query: &str) -> String {
+    let lower = query.to_lowercase();
+    let null_aliases = [
+        "empresa general",
+        "sin empresa",
+        "sin asignar",
+        "general",
+        "sin compañia",
+        "sin compania",
+    ];
+
+    for alias in &null_aliases {
+        // Try with a table alias prefix first (e.g. "d.company_name = 'general'")
+        // then without. This avoids leaving a dangling "d." after replacement.
+        let prefixed = format!(".company_name = '{}'", alias);
+        if let Some(pos) = lower.find(&prefixed) {
+            // Walk back to find the start of the alias (e.g. "d")
+            let alias_start = lower[..pos].rfind(|c: char| !c.is_alphanumeric() && c != '_')
+                .map(|p| p + 1)
+                .unwrap_or(0);
+            let end = pos + prefixed.len();
+            let original_token = &query[alias_start..end];
+            // Replace "d.company_name = 'General'" with correct alias-qualified NULL filter
+            let table_alias = &query[alias_start..pos]; // e.g. "d"
+            let replacement = format!(
+                "({}.company_name IS NULL OR TRIM({}.company_name) = '')",
+                table_alias, table_alias
+            );
+            return query.replacen(original_token, &replacement, 1);
+        }
+
+        // No table alias — plain "company_name = 'general'"
+        let plain = format!("company_name = '{}'", alias);
+        if let Some(pos) = lower.find(&plain) {
+            let original_token = &query[pos..pos + plain.len()];
+            let replacement = "(company_name IS NULL OR TRIM(company_name) = '')";
+            return query.replacen(original_token, replacement, 1);
+        }
+    }
+    query.to_string()
+}
+
 pub async fn query_app(
     apps: &HashMap<String, AppConnection>,
     app_slug: &str,
@@ -269,6 +318,13 @@ pub async fn query_app(
     if !trimmed.starts_with("SELECT") && !trimmed.starts_with("WITH") {
         return serde_json::json!({ "error": "Only SELECT or WITH queries are allowed" });
     }
+
+    let query = if app_slug == "cartera" {
+        rewrite_cartera_query(query)
+    } else {
+        query.to_string()
+    };
+    let query = query.as_str();
 
     let safe_query = if trimmed.contains("LIMIT") {
         query.to_string()
@@ -308,7 +364,10 @@ pub async fn describe_app(apps: &HashMap<String, AppConnection>, app_slug: &str)
 
     match sqlx::query(schema_query).fetch_all(&app_conn.pool).await {
         Ok(rows) => {
-            let tables = accumulate_schema(&rows);
+            let mut tables = accumulate_schema(&rows);
+            if !app_conn.key_tables.is_empty() {
+                tables.retain(|name, _| app_conn.key_tables.contains(name));
+            }
             serde_json::json!({
                 "status": "success",
                 "app": app_slug,
