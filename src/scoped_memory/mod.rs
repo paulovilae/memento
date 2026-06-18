@@ -1,9 +1,16 @@
 // Module declarations
+mod deletion;
+mod embedding;
 mod helpers;
 mod parsing;
 mod derivation;
+mod stats;
+
+pub use deletion::delete_records;
+pub use stats::app_stats;
 
 // Import internal types and functions
+use embedding::{cosine_similarity, parse_embedding, unpack_embedding};
 use helpers::*;
 use parsing::*;
 use derivation::*;
@@ -532,6 +539,152 @@ pub async fn recall_recursive_context(pool: &sqlx::PgPool, payload: Value) -> Va
     });
     store_cache("recall_recursive_context", &payload, &response);
     response
+}
+
+/// Semantic recall: given a `query_embedding`, rerank the caller's scope-filtered
+/// rows by cosine similarity and return the top-k. Filtering by scope first keeps
+/// the candidate set small (tens to hundreds of rows), so a brute-force cosine in
+/// Rust needs no ANN index or pgvector extension.
+///
+/// Telemetry: each call is logged to `recall_log` (best-effort) and the returned
+/// JSON includes a `request_id` that downstream consumers should pass back via
+/// `recall_feedback` once they know which of the returned ids were useful.
+pub async fn semantic_recall(pool: &sqlx::PgPool, payload: Value) -> Value {
+    let filters = ScopedMemoryFilters::from_payload(&payload);
+    if !filters.has_required_scope_filter() {
+        return scope_error_response(REQUIRED_SCOPE_ERROR);
+    }
+
+    let query_embedding: Vec<f32> = match payload.get("query_embedding").and_then(|v| v.as_array())
+    {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_f64().map(|f| f as f32))
+            .collect(),
+        None => return serde_json::json!({ "error": "Missing 'query_embedding' array in payload" }),
+    };
+    if query_embedding.is_empty() {
+        return serde_json::json!({ "error": "Empty 'query_embedding'" });
+    }
+
+    let request_id = payload
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(crate::recall_telemetry::generate_request_id);
+    let query_text = payload
+        .get("query_text")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let limit = clamp_i64(payload.get("limit").and_then(|v| v.as_i64()).unwrap_or(6), 1, 24);
+    // Pull a bounded candidate window (already scope-filtered) to rerank.
+    let candidate_cap = clamp_i64(
+        payload
+            .get("candidate_cap")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(400),
+        24,
+        2000,
+    );
+    let min_score = payload
+        .get("min_score")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.25) as f32;
+
+    let (where_clause, bind_values) = filters.build_where_clause();
+    let sql = format!(
+        "SELECT id, content, memory_type, entry_title, timestamp, embedding, embedding_b \
+         FROM scoped_memory \
+         WHERE {} AND embedding IS NOT NULL AND status = 'active' \
+         AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP) \
+         ORDER BY timestamp DESC LIMIT {}",
+        where_clause, candidate_cap
+    );
+    let mut query = sqlx::query(&sql);
+    for val in &bind_values {
+        query = query.bind(val);
+    }
+    let rows = match query.fetch_all(pool).await {
+        Ok(rows) => rows,
+        Err(e) => return serde_json::json!({ "error": format!("Query error: {}", e) }),
+    };
+
+    let mut scored: Vec<(f32, Value)> = Vec::new();
+    for row in &rows {
+        // Prefer the BYTEA fast-path (zero JSON parse); fall back to the TEXT column
+        // for rows written before migration 10.
+        let vec = match row
+            .get::<Option<Vec<u8>>, _>("embedding_b")
+            .as_deref()
+            .and_then(unpack_embedding)
+        {
+            Some(v) => v,
+            None => {
+                let raw: Option<String> = row.get("embedding");
+                let Some(raw) = raw else { continue };
+                let Some(v) = parse_embedding(&raw) else {
+                    continue;
+                };
+                v
+            }
+        };
+        let score = cosine_similarity(&query_embedding, &vec);
+        if score < min_score {
+            continue;
+        }
+        let content: String = row.get("content");
+        let entry = serde_json::json!({
+            "id": row.get::<i32, _>("id"),
+            "memory_type": row.get::<String, _>("memory_type"),
+            "entry_title": row.get::<String, _>("entry_title"),
+            "content": content,
+            "score": score,
+        });
+        scored.push((score, entry));
+    }
+
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let entries: Vec<Value> = scored
+        .into_iter()
+        .take(limit as usize)
+        .map(|(_, e)| e)
+        .collect();
+
+    // Returned-ids manifest for telemetry: keep id + score only (content lives in
+    // scoped_memory and is retrievable by id; storing it again would 5× the row).
+    let returned_ids: Vec<Value> = entries
+        .iter()
+        .filter_map(|e| {
+            let id = e.get("id")?;
+            let score = e.get("score")?;
+            Some(serde_json::json!({ "id": id, "score": score }))
+        })
+        .collect();
+    let returned_ids_value = Value::Array(returned_ids);
+    crate::recall_telemetry::log_recall(
+        pool,
+        &request_id,
+        filters.app_id.as_deref(),
+        filters.user_id.as_deref(),
+        filters.tenant_id.as_deref(),
+        filters.session_id.as_deref(),
+        query_text.as_deref(),
+        &query_embedding,
+        &returned_ids_value,
+        rows.len() as i32,
+    )
+    .await;
+
+    serde_json::json!({
+        "status": "success",
+        "retrieval_strategy": "semantic_cosine",
+        "request_id": request_id,
+        "count": entries.len(),
+        "candidates_scanned": rows.len(),
+        "entries": entries
+    })
 }
 
 pub async fn search_records(pool: &sqlx::PgPool, payload: Value) -> Value {
@@ -1287,5 +1440,80 @@ mod tests {
             "expected an automatically derived session_summary entry: {}",
             result
         );
+    }
+
+    #[tokio::test]
+    async fn semantic_recall_logs_telemetry_and_feedback_round_trips() {
+        let (pool, _container) = test_pool().await;
+
+        // Seed one row with a known embedding so semantic_recall has a hit.
+        let saved = save_record(
+            &pool,
+            serde_json::json!({
+                "user_id": "user-recall",
+                "app_id": "vetra",
+                "session_id": "sess-1",
+                "scope": "personal",
+                "content": "Contracts with margin > 30% should be flagged.",
+                "memory_type": "preference",
+                "embedding": [1.0, 0.0, 0.0, 0.0]
+            }),
+        )
+        .await;
+        assert_eq!(saved["status"], "success", "save_record failed: {}", saved);
+
+        // Recall with a query embedding that matches the seeded vector exactly.
+        let recall = semantic_recall(
+            &pool,
+            serde_json::json!({
+                "user_id": "user-recall",
+                "app_id": "vetra",
+                "query_embedding": [1.0, 0.0, 0.0, 0.0],
+                "query_text": "flag high-margin contracts",
+                "limit": 5
+            }),
+        )
+        .await;
+        assert_eq!(recall["status"], "success", "semantic_recall: {}", recall);
+        let request_id = recall["request_id"]
+            .as_str()
+            .expect("request_id missing from semantic_recall response")
+            .to_string();
+        assert!(!request_id.is_empty());
+        let entries = recall["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        let cited_id = entries[0]["id"].clone();
+
+        // recall_log should now hold one row keyed by request_id.
+        let log_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM recall_log WHERE request_id = $1",
+        )
+        .bind(&request_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(log_count, 1, "recall_log did not record the call");
+
+        // Feedback round-trip: report which id was cited.
+        let fb = crate::recall_telemetry::recall_feedback(
+            &pool,
+            serde_json::json!({
+                "request_id": request_id,
+                "cited_ids": [cited_id],
+                "feedback_kind": "cited"
+            }),
+        )
+        .await;
+        assert_eq!(fb["status"], "success", "recall_feedback: {}", fb);
+        assert_eq!(fb["request_id"], request_id);
+
+        let fb_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM recall_feedback WHERE request_id = $1",
+        )
+        .bind(&request_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(fb_count, 1, "recall_feedback did not insert the row");
     }
 }

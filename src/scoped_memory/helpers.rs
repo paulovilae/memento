@@ -384,6 +384,31 @@ pub(super) fn bullet_lines(rows: &[&sqlx::postgres::PgRow], limit: usize) -> Vec
         .collect()
 }
 
+/// Bullet list for prior summary rows. Unlike `bullet_lines`, this NEVER copies
+/// the body — only the title + timestamp. Body-copying causes a recursive
+/// amplification flywheel: every summary's content begins with a boilerplate
+/// header ("Operational Summary\n..."), so embedding the prefix verbatim made
+/// each new summary read like "- session summary X: Operational Summary, -
+/// session summary Y: Operational Summary, ..." compounding each pass and
+/// blowing up the prompt context. Reference-only entries break the cycle.
+pub(super) fn summary_reference_lines(
+    rows: &[&sqlx::postgres::PgRow],
+    limit: usize,
+) -> Vec<String> {
+    rows.iter()
+        .take(limit)
+        .map(|row| {
+            let title = row.get::<String, _>("entry_title");
+            let ts = row_timestamp_string(row, "timestamp");
+            if title.trim().is_empty() {
+                format!("- (untitled summary @ {})", ts)
+            } else {
+                format!("- {} @ {}", title.trim(), ts)
+            }
+        })
+        .collect()
+}
+
 pub(super) fn join_lines(lines: &[String], empty_fallback: &str) -> String {
     if lines.is_empty() {
         empty_fallback.to_string()

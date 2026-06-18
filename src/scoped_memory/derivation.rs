@@ -283,7 +283,7 @@ pub(super) async fn build_recursive_summary(
         .collect();
 
     let operational = join_lines(
-        &bullet_lines(&summaries, 4),
+        &summary_reference_lines(&summaries, 4),
         "No prior operational summaries captured.",
     );
     let decisions_text = join_lines(
