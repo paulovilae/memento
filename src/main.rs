@@ -22,6 +22,8 @@ mod knowledge;
 mod metrics;
 mod migrations;
 mod query_cache;
+mod rag_store;
+pub mod recall_telemetry;
 mod runtime_memory;
 mod schema;
 mod scoped_memory;
@@ -88,8 +90,13 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 6. Setup Unix Domain Socket (UDS) for Zero-Copy IPC with Hera/Imaginclaw
-    let socket_path = "/tmp/memento.sock";
+    // 6. Setup Unix Domain Socket (UDS) for Zero-Copy IPC with Hera/Imaginclaw.
+    // Default is `/tmp/memento.sock` (what every client hardcodes); tests/dev can
+    // point to a private path via MEMENTO_SOCKET_PATH so they don't clobber a
+    // running production daemon on the same machine.
+    let socket_path_owned = std::env::var("MEMENTO_SOCKET_PATH")
+        .unwrap_or_else(|_| "/tmp/memento.sock".to_string());
+    let socket_path = socket_path_owned.as_str();
 
     // Clean up old socket if it exists
     if Path::new(socket_path).exists() {
@@ -316,6 +323,24 @@ async fn process_uds_stream(
             "recall_recursive_context" => {
                 scoped_memory::recall_recursive_context(&pool, req.payload).await
             }
+            "semantic_recall" => scoped_memory::semantic_recall(&pool, req.payload).await,
+            "recall_feedback" => recall_telemetry::recall_feedback(&pool, req.payload).await,
+
+            "delete_scoped_memory" => {
+                // Accept both { "ids": [1,2,3] } and { "id": 1 }; normalise to Vec<i32>.
+                let ids: Vec<i32> = if let Some(arr) = req.payload.get("ids").and_then(|v| v.as_array()) {
+                    arr.iter()
+                        .filter_map(|v| v.as_i64().map(|n| n as i32))
+                        .collect()
+                } else if let Some(single) = req.payload.get("id").and_then(|v| v.as_i64()) {
+                    vec![single as i32]
+                } else {
+                    Vec::new()
+                };
+                scoped_memory::delete_records(&pool, ids).await
+            }
+
+            "scoped_memory_app_stats" => scoped_memory::app_stats(&pool).await,
 
             // ─── Virtual Office: Audit Log ─────────────────────────────
             "audit_log" => audit::audit_log(&pool, req.payload).await,
@@ -336,6 +361,16 @@ async fn process_uds_stream(
             "get_document_index" => document_index_ipc::get(&pool, req.payload).await,
             "list_document_indexes" => document_index_ipc::list(&pool, req.payload).await,
             "query_document_index" => document_index_ipc::query(&pool, req.payload).await,
+
+            // ─── RAG Document Store ───────────────────────────────────────
+            "rag_ingest_document" => rag_store::ingest_document(&pool, req.payload).await,
+            "rag_list_documents" => rag_store::list_documents(&pool, req.payload).await,
+            "rag_get_document" => rag_store::get_document(&pool, req.payload).await,
+            "rag_update_document" => rag_store::update_document(&pool, req.payload).await,
+            "rag_reembed_document" => rag_store::reembed_document(&pool, req.payload).await,
+            "rag_delete_document" => rag_store::delete_document(&pool, req.payload).await,
+            "rag_search" => rag_store::search(&pool, req.payload).await,
+            "rag_pinned" => rag_store::pinned(&pool, req.payload).await,
 
             // ─── Paulo Bio Data Actions ───────────────────────────────
             "query_bio" => bio::query_bio(&pool, req.payload).await,

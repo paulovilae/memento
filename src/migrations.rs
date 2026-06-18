@@ -428,6 +428,156 @@ async fn migration_7_audit_chain(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn migration_8_scoped_embedding(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    // Semantic recall: JSON-encoded f32 vector (e.g. 384-dim multilingual MiniLM).
+    // Stored as TEXT to avoid a pgvector dependency; cosine rerank happens in Rust
+    // over the already scope-filtered candidate rows.
+    ensure_pg_column(pool, "scoped_memory", "embedding", "TEXT").await?;
+    // Performance: scope-filtered recall/query was doing sequential scans (6-14s
+    // observed). Index the common scope filter + recency order.
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_scoped_memory_scope_time \
+         ON scoped_memory (user_id, app_id, session_id, timestamp DESC)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn migration_9_recall_telemetry(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    // Flywheel data for embedder reranker fine-tune: each semantic_recall call
+    // writes a recall_log row; later, Hera (or any caller) reports back which
+    // returned ids were actually cited via recall_feedback. Joined on request_id,
+    // these pairs become (query, positives, negatives) training tuples.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS recall_log (
+            id BIGSERIAL PRIMARY KEY,
+            request_id TEXT NOT NULL,
+            app_id TEXT NOT NULL DEFAULT 'os',
+            user_id TEXT,
+            tenant_id TEXT,
+            session_id TEXT,
+            query_text TEXT,
+            query_embedding TEXT NOT NULL,
+            returned_ids JSONB NOT NULL,
+            candidates_scanned INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_recall_log_request_id ON recall_log (request_id)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_recall_log_created_at ON recall_log (created_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS recall_feedback (
+            id BIGSERIAL PRIMARY KEY,
+            request_id TEXT NOT NULL,
+            cited_ids JSONB NOT NULL,
+            feedback_kind TEXT NOT NULL DEFAULT 'cited',
+            notes TEXT,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_recall_feedback_request_id ON recall_feedback (request_id)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn migration_10_scoped_embedding_bytea(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    // Recall fast-path: store the f32 vector as raw little-endian BYTEA alongside the
+    // existing TEXT (JSON) column. `semantic_recall` prefers BYTEA and skips the
+    // per-candidate `serde_json::from_str` (up to candidate_cap=400 parses/recall on
+    // Hera's hot path). The TEXT column is kept for backward/rollback compatibility and
+    // for rows written before this migration (those fall back to the TEXT parse).
+    ensure_pg_column(pool, "scoped_memory", "embedding_b", "BYTEA").await?;
+    Ok(())
+}
+
+async fn migration_11_rag_documents(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    // RAG document store: full-text documents + embedded chunks for semantic
+    // retrieval per scope (app / tenant / expert / collection).
+    // rag_document = one row per document (header + full_text)
+    // rag_chunk    = N rows per document (chunked text + embedding_b BYTEA)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS rag_document (
+            id            BIGSERIAL PRIMARY KEY,
+            document_id   TEXT UNIQUE NOT NULL,
+            app_id        TEXT,
+            tenant_id     TEXT,
+            expert_id     TEXT,
+            owner_scope   TEXT,
+            collection    TEXT,
+            title         TEXT NOT NULL,
+            source_type   TEXT NOT NULL DEFAULT 'text',
+            source_uri    TEXT,
+            full_text     TEXT NOT NULL DEFAULT '',
+            char_count    INTEGER NOT NULL DEFAULT 0,
+            pinned        BOOLEAN NOT NULL DEFAULT FALSE,
+            status        TEXT NOT NULL DEFAULT 'active',
+            usage_count   INTEGER NOT NULL DEFAULT 0,
+            last_used_at  TIMESTAMP,
+            metadata_json JSONB,
+            created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS rag_chunk (
+            id            BIGSERIAL PRIMARY KEY,
+            document_id   TEXT NOT NULL REFERENCES rag_document(document_id) ON DELETE CASCADE,
+            ordinal       INTEGER NOT NULL,
+            heading_path  TEXT,
+            content       TEXT NOT NULL DEFAULT '',
+            token_count   INTEGER NOT NULL DEFAULT 0,
+            embedding_b   BYTEA,
+            created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_rag_chunk_doc \
+         ON rag_chunk(document_id, ordinal)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_rag_document_scope \
+         ON rag_document(app_id, tenant_id, expert_id, collection, status)",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 pub async fn run_all(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     ensure_migrations_table(pool).await?;
 
@@ -444,6 +594,34 @@ pub async fn run_all(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     run_migration(pool, 5, "audit_and_bio", migration_5_audit_and_bio(pool)).await?;
     run_migration(pool, 6, "document_index", migration_6_document_index(pool)).await?;
     run_migration(pool, 7, "audit_chain", migration_7_audit_chain(pool)).await?;
+    run_migration(
+        pool,
+        8,
+        "scoped_embedding",
+        migration_8_scoped_embedding(pool),
+    )
+    .await?;
+    run_migration(
+        pool,
+        9,
+        "recall_telemetry",
+        migration_9_recall_telemetry(pool),
+    )
+    .await?;
+    run_migration(
+        pool,
+        10,
+        "scoped_embedding_bytea",
+        migration_10_scoped_embedding_bytea(pool),
+    )
+    .await?;
+    run_migration(
+        pool,
+        11,
+        "rag_documents",
+        migration_11_rag_documents(pool),
+    )
+    .await?;
 
     Ok(())
 }
