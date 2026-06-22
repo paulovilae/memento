@@ -511,6 +511,73 @@ async fn migration_10_scoped_embedding_bytea(pool: &sqlx::PgPool) -> anyhow::Res
     Ok(())
 }
 
+async fn migration_11_rag_documents(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    // RAG document store: full-text documents + embedded chunks for semantic
+    // retrieval per scope (app / tenant / expert / collection).
+    // rag_document = one row per document (header + full_text)
+    // rag_chunk    = N rows per document (chunked text + embedding_b BYTEA)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS rag_document (
+            id            BIGSERIAL PRIMARY KEY,
+            document_id   TEXT UNIQUE NOT NULL,
+            app_id        TEXT,
+            tenant_id     TEXT,
+            expert_id     TEXT,
+            owner_scope   TEXT,
+            collection    TEXT,
+            title         TEXT NOT NULL,
+            source_type   TEXT NOT NULL DEFAULT 'text',
+            source_uri    TEXT,
+            full_text     TEXT NOT NULL DEFAULT '',
+            char_count    INTEGER NOT NULL DEFAULT 0,
+            pinned        BOOLEAN NOT NULL DEFAULT FALSE,
+            status        TEXT NOT NULL DEFAULT 'active',
+            usage_count   INTEGER NOT NULL DEFAULT 0,
+            last_used_at  TIMESTAMP,
+            metadata_json JSONB,
+            created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS rag_chunk (
+            id            BIGSERIAL PRIMARY KEY,
+            document_id   TEXT NOT NULL REFERENCES rag_document(document_id) ON DELETE CASCADE,
+            ordinal       INTEGER NOT NULL,
+            heading_path  TEXT,
+            content       TEXT NOT NULL DEFAULT '',
+            token_count   INTEGER NOT NULL DEFAULT 0,
+            embedding_b   BYTEA,
+            created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_rag_chunk_doc \
+         ON rag_chunk(document_id, ordinal)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_rag_document_scope \
+         ON rag_document(app_id, tenant_id, expert_id, collection, status)",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 pub async fn run_all(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     ensure_migrations_table(pool).await?;
 
@@ -546,6 +613,13 @@ pub async fn run_all(pool: &sqlx::PgPool) -> anyhow::Result<()> {
         10,
         "scoped_embedding_bytea",
         migration_10_scoped_embedding_bytea(pool),
+    )
+    .await?;
+    run_migration(
+        pool,
+        11,
+        "rag_documents",
+        migration_11_rag_documents(pool),
     )
     .await?;
 

@@ -22,6 +22,7 @@ mod knowledge;
 mod metrics;
 mod migrations;
 mod query_cache;
+mod rag_store;
 pub mod recall_telemetry;
 mod runtime_memory;
 mod schema;
@@ -360,6 +361,16 @@ async fn process_uds_stream(
             "get_document_index" => document_index_ipc::get(&pool, req.payload).await,
             "list_document_indexes" => document_index_ipc::list(&pool, req.payload).await,
             "query_document_index" => document_index_ipc::query(&pool, req.payload).await,
+
+            // ─── RAG Document Store ───────────────────────────────────────
+            "rag_ingest_document" => rag_store::ingest_document(&pool, req.payload).await,
+            "rag_list_documents" => rag_store::list_documents(&pool, req.payload).await,
+            "rag_get_document" => rag_store::get_document(&pool, req.payload).await,
+            "rag_update_document" => rag_store::update_document(&pool, req.payload).await,
+            "rag_reembed_document" => rag_store::reembed_document(&pool, req.payload).await,
+            "rag_delete_document" => rag_store::delete_document(&pool, req.payload).await,
+            "rag_search" => rag_store::search(&pool, req.payload).await,
+            "rag_pinned" => rag_store::pinned(&pool, req.payload).await,
 
             // ─── Paulo Bio Data Actions ───────────────────────────────
             "query_bio" => bio::query_bio(&pool, req.payload).await,
