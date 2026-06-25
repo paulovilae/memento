@@ -247,6 +247,16 @@ impl SecurityConfig {
             | "semantic_recall"
             | "vector_search"
             | "extract_text"
+            // RAG document store (os-rag-kit): aislado por scope app_id/tenant_id en el payload,
+            // mismo criterio que vector_search/semantic_recall. rag-kit llama sin token de cliente.
+            | "rag_ingest_document"
+            | "rag_list_documents"
+            | "rag_get_document"
+            | "rag_update_document"
+            | "rag_reembed_document"
+            | "rag_delete_document"
+            | "rag_search"
+            | "rag_pinned"
             | "save_memory" => Ok(()),
             // Fail-closed: cualquier acción NO listada explícitamente se DENIEGA.
             // Antes `_ => Ok(())` dejaba abierta sin auth toda acción nueva que se
