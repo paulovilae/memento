@@ -13,6 +13,7 @@ mod audit;
 mod bio;
 mod chat_memory;
 pub mod config;
+mod doc_extract;
 mod document_index;
 mod document_index_ipc;
 mod hardware;
@@ -361,6 +362,9 @@ async fn process_uds_stream(
             "get_document_index" => document_index_ipc::get(&pool, req.payload).await,
             "list_document_indexes" => document_index_ipc::list(&pool, req.payload).await,
             "query_document_index" => document_index_ipc::query(&pool, req.payload).await,
+
+            // ─── Conversor de documentos (path → texto; ver doc_extract.rs) ──
+            "extract_text" => doc_extract::extract_text(req.payload).await,
 
             // ─── RAG Document Store ───────────────────────────────────────
             "rag_ingest_document" => rag_store::ingest_document(&pool, req.payload).await,

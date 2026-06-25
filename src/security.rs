@@ -246,6 +246,7 @@ impl SecurityConfig {
             | "record_context_feedback"
             | "semantic_recall"
             | "vector_search"
+            | "extract_text"
             | "save_memory" => Ok(()),
             // Fail-closed: cualquier acción NO listada explícitamente se DENIEGA.
             // Antes `_ => Ok(())` dejaba abierta sin auth toda acción nueva que se
