@@ -151,21 +151,40 @@ async fn process_uds_stream(
     apps: AppConnections,
     security: SecurityConfig,
 ) -> anyhow::Result<()> {
-    let mut buffer = vec![0; 8192 * 4];
+    // Acumula el mensaje COMPLETO antes de parsear: un request puede superar un solo chunk de 32 KB
+    // (p.ej. `rag_ingest_document` de un documento grande con texto + embeddings). Leemos en bucle
+    // hasta que el JSON sea parseable o hasta EOF. Los clientes hacen un request por conexión
+    // (write + shutdown del lado de escritura), así que el cierre marca el fin del mensaje y el
+    // try-parse permite responder en cuanto el JSON está completo aunque el cliente no cierre.
+    let mut chunk = vec![0u8; 8192 * 4];
+    const MAX_MSG: usize = 64 * 1024 * 1024; // backstop anti-OOM (64 MB)
     loop {
-        let n = stream.read(&mut buffer).await?;
-        if n == 0 {
-            break;
-        }
-
-        let msg_str = std::str::from_utf8(&buffer[..n])?;
-
-        let req: IpcMessage = match serde_json::from_str(msg_str) {
-            Ok(r) => r,
-            Err(e) => {
-                let err_res = serde_json::json!({ "error": format!("Invalid JSON: {}", e) });
+        let mut buffer: Vec<u8> = Vec::new();
+        let req: IpcMessage = loop {
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                if buffer.is_empty() {
+                    return Ok(()); // conexión cerrada limpiamente, sin mensaje pendiente
+                }
+                match serde_json::from_slice(&buffer) {
+                    Ok(parsed) => break parsed,
+                    Err(e) => {
+                        let err_res =
+                            serde_json::json!({ "error": format!("Invalid JSON: {}", e) });
+                        let _ = stream.write_all(err_res.to_string().as_bytes()).await;
+                        return Ok(());
+                    }
+                }
+            }
+            buffer.extend_from_slice(&chunk[..n]);
+            if buffer.len() > MAX_MSG {
+                let err_res = serde_json::json!({ "error": "request too large" });
                 let _ = stream.write_all(err_res.to_string().as_bytes()).await;
-                continue;
+                return Ok(());
+            }
+            // ¿JSON completo ya? Si aún no parsea (mensaje incompleto), seguimos leyendo.
+            if let Ok(parsed) = serde_json::from_slice::<IpcMessage>(&buffer) {
+                break parsed;
             }
         };
 
@@ -421,7 +440,7 @@ async fn process_uds_stream(
         if let Err(e) = stream.write_all(response.to_string().as_bytes()).await {
             error!("Failed to send IPC response: {}", e);
         }
+        // El bucle continúa: una conexión puede traer más requests (secuenciales). El cierre del
+        // cliente (read → 0 con buffer vacío) sale de la función con Ok más arriba.
     }
-
-    Ok(())
 }
