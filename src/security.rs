@@ -257,6 +257,10 @@ impl SecurityConfig {
             | "rag_delete_document"
             | "rag_search"
             | "rag_pinned"
+            | "rag_chunk_vectors"
+            | "kg_upsert_triples"
+            | "kg_graph"
+            | "kg_neighbors"
             | "save_memory" => Ok(()),
             // Fail-closed: cualquier acción NO listada explícitamente se DENIEGA.
             // Antes `_ => Ok(())` dejaba abierta sin auth toda acción nueva que se

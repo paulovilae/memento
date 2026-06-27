@@ -19,6 +19,7 @@ mod document_index_ipc;
 mod hardware;
 mod ingestion;
 mod interaction_memory;
+mod kg_store;
 mod knowledge;
 mod metrics;
 mod migrations;
@@ -95,8 +96,8 @@ async fn main() -> anyhow::Result<()> {
     // Default is `/tmp/memento.sock` (what every client hardcodes); tests/dev can
     // point to a private path via MEMENTO_SOCKET_PATH so they don't clobber a
     // running production daemon on the same machine.
-    let socket_path_owned = std::env::var("MEMENTO_SOCKET_PATH")
-        .unwrap_or_else(|_| "/tmp/memento.sock".to_string());
+    let socket_path_owned =
+        std::env::var("MEMENTO_SOCKET_PATH").unwrap_or_else(|_| "/tmp/memento.sock".to_string());
     let socket_path = socket_path_owned.as_str();
 
     // Clean up old socket if it exists
@@ -348,15 +349,16 @@ async fn process_uds_stream(
 
             "delete_scoped_memory" => {
                 // Accept both { "ids": [1,2,3] } and { "id": 1 }; normalise to Vec<i32>.
-                let ids: Vec<i32> = if let Some(arr) = req.payload.get("ids").and_then(|v| v.as_array()) {
-                    arr.iter()
-                        .filter_map(|v| v.as_i64().map(|n| n as i32))
-                        .collect()
-                } else if let Some(single) = req.payload.get("id").and_then(|v| v.as_i64()) {
-                    vec![single as i32]
-                } else {
-                    Vec::new()
-                };
+                let ids: Vec<i32> =
+                    if let Some(arr) = req.payload.get("ids").and_then(|v| v.as_array()) {
+                        arr.iter()
+                            .filter_map(|v| v.as_i64().map(|n| n as i32))
+                            .collect()
+                    } else if let Some(single) = req.payload.get("id").and_then(|v| v.as_i64()) {
+                        vec![single as i32]
+                    } else {
+                        Vec::new()
+                    };
                 scoped_memory::delete_records(&pool, ids).await
             }
 
@@ -394,6 +396,10 @@ async fn process_uds_stream(
             "rag_delete_document" => rag_store::delete_document(&pool, req.payload).await,
             "rag_search" => rag_store::search(&pool, req.payload).await,
             "rag_pinned" => rag_store::pinned(&pool, req.payload).await,
+            "rag_chunk_vectors" => rag_store::chunk_vectors(&pool, req.payload).await,
+            "kg_upsert_triples" => kg_store::upsert_triples(&pool, req.payload).await,
+            "kg_graph" => kg_store::graph(&pool, req.payload).await,
+            "kg_neighbors" => kg_store::neighbors(&pool, req.payload).await,
 
             // ─── Paulo Bio Data Actions ───────────────────────────────
             "query_bio" => bio::query_bio(&pool, req.payload).await,

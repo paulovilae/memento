@@ -468,11 +468,9 @@ async fn migration_9_recall_telemetry(pool: &sqlx::PgPool) -> anyhow::Result<()>
     )
     .execute(pool)
     .await?;
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_recall_log_request_id ON recall_log (request_id)",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_recall_log_request_id ON recall_log (request_id)")
+        .execute(pool)
+        .await?;
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_recall_log_created_at ON recall_log (created_at DESC)",
     )
@@ -578,6 +576,86 @@ async fn migration_11_rag_documents(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn migration_12_knowledge_graph(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    // Sovereign knowledge graph (relational / graph RAG). ONE graph per scope, fed
+    // by TWO sources: RAG documents (chunks) AND durable memory (facts/decisions/
+    // summaries) — never raw chat turns. Entities are resolved (deduped) by
+    // normalized name + type within a scope, so the same person/company/law is one
+    // node regardless of how many docs or memories mention it.
+    //
+    // kg_entity   = one row per resolved entity (name + type + embedding + provenance)
+    // kg_relation = directed typed edge between two entities (with evidence + weight)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS kg_entity (
+            id            BIGSERIAL PRIMARY KEY,
+            entity_id     TEXT UNIQUE NOT NULL,
+            app_id        TEXT,
+            tenant_id     TEXT,
+            expert_id     TEXT,
+            collection    TEXT,
+            name          TEXT NOT NULL,
+            norm_name     TEXT NOT NULL,
+            entity_type   TEXT NOT NULL DEFAULT 'concept',
+            summary       TEXT,
+            embedding_b   BYTEA,
+            mention_count INTEGER NOT NULL DEFAULT 1,
+            source_kinds  JSONB,
+            doc_ids       JSONB,
+            metadata_json JSONB,
+            created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS kg_relation (
+            id            BIGSERIAL PRIMARY KEY,
+            relation_id   TEXT UNIQUE NOT NULL,
+            app_id        TEXT,
+            tenant_id     TEXT,
+            expert_id     TEXT,
+            collection    TEXT,
+            src_id        TEXT NOT NULL,
+            dst_id        TEXT NOT NULL,
+            rel_type      TEXT NOT NULL DEFAULT 'relates',
+            weight        REAL NOT NULL DEFAULT 1.0,
+            evidence      TEXT,
+            source_kinds  JSONB,
+            created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_kg_entity_scope \
+         ON kg_entity(app_id, tenant_id, expert_id, collection)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_kg_relation_scope \
+         ON kg_relation(app_id, tenant_id, expert_id, collection)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_kg_relation_src ON kg_relation(src_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_kg_relation_dst ON kg_relation(dst_id)")
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
 pub async fn run_all(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     ensure_migrations_table(pool).await?;
 
@@ -615,11 +693,12 @@ pub async fn run_all(pool: &sqlx::PgPool) -> anyhow::Result<()> {
         migration_10_scoped_embedding_bytea(pool),
     )
     .await?;
+    run_migration(pool, 11, "rag_documents", migration_11_rag_documents(pool)).await?;
     run_migration(
         pool,
-        11,
-        "rag_documents",
-        migration_11_rag_documents(pool),
+        12,
+        "knowledge_graph",
+        migration_12_knowledge_graph(pool),
     )
     .await?;
 

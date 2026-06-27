@@ -112,9 +112,7 @@ pub async fn ingest_document(pool: &sqlx::PgPool, payload: Value) -> Value {
         .get("collection")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let metadata_str: Option<String> = payload
-        .get("metadata_json")
-        .map(|v| v.to_string());
+    let metadata_str: Option<String> = payload.get("metadata_json").map(|v| v.to_string());
 
     if let Err(e) = sqlx::query(
         r#"
@@ -177,10 +175,7 @@ pub async fn ingest_document(pool: &sqlx::PgPool, payload: Value) -> Value {
     let mut chunks_ingested = 0usize;
 
     for chunk in chunks {
-        let ordinal = chunk
-            .get("ordinal")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as i32;
+        let ordinal = chunk.get("ordinal").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
         let heading_path: Option<String> = chunk
             .get("heading_path")
             .and_then(|v| v.as_str())
@@ -194,16 +189,17 @@ pub async fn ingest_document(pool: &sqlx::PgPool, payload: Value) -> Value {
             .get("token_count")
             .and_then(|v| v.as_i64())
             .unwrap_or(0) as i32;
-        let embedding_b: Option<Vec<u8>> = chunk
-            .get("embedding")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                let floats: Vec<f32> = arr
-                    .iter()
-                    .filter_map(|x| x.as_f64().map(|f| f as f32))
-                    .collect();
-                pack_embedding(&floats)
-            });
+        let embedding_b: Option<Vec<u8>> =
+            chunk
+                .get("embedding")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    let floats: Vec<f32> = arr
+                        .iter()
+                        .filter_map(|x| x.as_f64().map(|f| f as f32))
+                        .collect();
+                    pack_embedding(&floats)
+                });
 
         if let Err(e) = sqlx::query(
             "INSERT INTO rag_chunk (document_id, ordinal, heading_path, content, token_count, embedding_b) \
@@ -260,14 +256,11 @@ pub async fn list_documents(pool: &sqlx::PgPool, payload: Value) -> Value {
         .and_then(|v| v.as_str())
         .unwrap_or("active")
         .to_string();
-    let limit = payload
-        .get("limit")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(50);
+    let limit = payload.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
 
     match sqlx::query(
         "SELECT document_id, title, source_type, source_uri, char_count, pinned, status, \
-         app_id, tenant_id, expert_id, collection, usage_count, created_at, updated_at \
+         app_id, tenant_id, expert_id, collection, usage_count, metadata_json, created_at, updated_at \
          FROM rag_document \
          WHERE status = $1 \
            AND ($2::text IS NULL OR app_id    = $2) \
@@ -303,6 +296,7 @@ pub async fn list_documents(pool: &sqlx::PgPool, payload: Value) -> Value {
                         "expert_id":    r.get::<Option<String>, _>("expert_id"),
                         "collection":   r.get::<Option<String>, _>("collection"),
                         "usage_count":  r.get::<i32, _>("usage_count"),
+                        "metadata_json": r.get::<Option<Value>, _>("metadata_json"),
                         "created_at":   ts_str(r.get::<Option<chrono::NaiveDateTime>, _>("created_at")),
                         "updated_at":   ts_str(r.get::<Option<chrono::NaiveDateTime>, _>("updated_at")),
                     })
@@ -362,7 +356,7 @@ pub async fn get_document(pool: &sqlx::PgPool, payload: Value) -> Value {
                 "owner_scope":  r.get::<Option<String>, _>("owner_scope"),
                 "collection":   r.get::<Option<String>, _>("collection"),
                 "usage_count":  r.get::<i32, _>("usage_count"),
-                "metadata_json": r.get::<Option<String>, _>("metadata_json"),
+                "metadata_json": r.get::<Option<Value>, _>("metadata_json"),
                 "created_at":   ts_str(r.get::<Option<chrono::NaiveDateTime>, _>("created_at")),
                 "updated_at":   ts_str(r.get::<Option<chrono::NaiveDateTime>, _>("updated_at")),
             });
@@ -547,10 +541,7 @@ pub async fn delete_document(pool: &sqlx::PgPool, payload: Value) -> Value {
 //   candidate_cap?: i64 (default 400) — rows fetched before cosine rerank
 
 pub async fn search(pool: &sqlx::PgPool, payload: Value) -> Value {
-    let query_vec: Vec<f32> = match payload
-        .get("query_embedding")
-        .and_then(|v| v.as_array())
-    {
+    let query_vec: Vec<f32> = match payload.get("query_embedding").and_then(|v| v.as_array()) {
         Some(arr) => arr
             .iter()
             .filter_map(|x| x.as_f64().map(|f| f as f32))
@@ -577,7 +568,11 @@ pub async fn search(pool: &sqlx::PgPool, payload: Value) -> Value {
         .get("collection")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let k = payload.get("k").and_then(|v| v.as_i64()).unwrap_or(5).min(20);
+    let k = payload
+        .get("k")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(5)
+        .min(20);
     let candidate_cap = payload
         .get("candidate_cap")
         .and_then(|v| v.as_i64())
@@ -611,8 +606,7 @@ pub async fn search(pool: &sqlx::PgPool, payload: Value) -> Value {
             let mut scored: Vec<(f32, Value)> = rows
                 .iter()
                 .filter_map(|r| {
-                    let emb_bytes: Option<Vec<u8>> =
-                        r.get::<Option<Vec<u8>>, _>("embedding_b");
+                    let emb_bytes: Option<Vec<u8>> = r.get::<Option<Vec<u8>>, _>("embedding_b");
                     let vec = emb_bytes.as_deref().and_then(unpack_embedding)?;
                     let score = cosine_similarity(&query_vec, &vec);
                     Some((
@@ -717,6 +711,120 @@ pub async fn pinned(pool: &sqlx::PgPool, payload: Value) -> Value {
         }
         Err(e) => {
             error!(?e, "rag_pinned: query failed");
+            json!({ "error": format!("DB error: {}", e) })
+        }
+    }
+}
+
+// ─── rag_chunk_vectors ────────────────────────────────────────────────────────
+//
+// Returns the REAL per-chunk embedding vectors (unpacked f32 arrays) for a scope,
+// joined to their parent document (title + metadata_json for payload/tags). Used
+// by the sovereign vector viewer (graph-kit) to plot points by real semantic
+// similarity (PCA in the caller), not the old hash projection.
+//
+// Payload (all optional except scope is enforced by the same filter as list):
+//   app_id, tenant_id, expert_id, collection?, status? (default "active"),
+//   max_docs?: i64 (default 40), max_chunks?: i64 (default 240)
+//
+// Anti-IDOR: same scope WHERE clause as rag_list_documents — a caller can only
+// reach chunks of documents inside its own scope.
+pub async fn chunk_vectors(pool: &sqlx::PgPool, payload: Value) -> Value {
+    let app_id: Option<String> = payload
+        .get("app_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let tenant_id: Option<String> = payload
+        .get("tenant_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let expert_id: Option<String> = payload
+        .get("expert_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let collection: Option<String> = payload
+        .get("collection")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let status = payload
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("active")
+        .to_string();
+    let max_docs = payload
+        .get("max_docs")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(40)
+        .clamp(1, 200);
+    let max_chunks = payload
+        .get("max_chunks")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(240)
+        .clamp(1, 2000);
+
+    use sqlx::Row;
+    match sqlx::query(
+        "SELECT c.document_id, c.ordinal, c.heading_path, c.content, c.embedding_b, \
+                d.title, d.source_type, d.metadata_json \
+         FROM rag_chunk c \
+         JOIN rag_document d ON d.document_id = c.document_id \
+         WHERE d.status = $1 \
+           AND ($2::text IS NULL OR d.app_id    = $2) \
+           AND ($3::text IS NULL OR d.tenant_id = $3) \
+           AND ($4::text IS NULL OR d.expert_id = $4) \
+           AND ($5::text IS NULL OR d.collection = $5) \
+           AND c.embedding_b IS NOT NULL \
+           AND d.document_id IN ( \
+               SELECT document_id FROM rag_document \
+               WHERE status = $1 \
+                 AND ($2::text IS NULL OR app_id    = $2) \
+                 AND ($3::text IS NULL OR tenant_id = $3) \
+                 AND ($4::text IS NULL OR expert_id = $4) \
+                 AND ($5::text IS NULL OR collection = $5) \
+               ORDER BY created_at DESC LIMIT $6 \
+           ) \
+         ORDER BY d.created_at DESC, c.ordinal ASC \
+         LIMIT $7",
+    )
+    .bind(&status)
+    .bind(&app_id)
+    .bind(&tenant_id)
+    .bind(&expert_id)
+    .bind(&collection)
+    .bind(max_docs)
+    .bind(max_chunks)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => {
+            let chunks: Vec<Value> = rows
+                .iter()
+                .filter_map(|r| {
+                    let emb_bytes: Option<Vec<u8>> = r.get::<Option<Vec<u8>>, _>("embedding_b");
+                    let vector = emb_bytes.as_deref().and_then(unpack_embedding)?;
+                    Some(json!({
+                        "document_id":  r.get::<String, _>("document_id"),
+                        "title":        r.get::<String, _>("title"),
+                        "source_type":  r.get::<String, _>("source_type"),
+                        "metadata_json": r.get::<Option<Value>, _>("metadata_json"),
+                        "ordinal":      r.get::<i32, _>("ordinal"),
+                        "heading_path": r.get::<Option<String>, _>("heading_path"),
+                        "content":      r.get::<String, _>("content"),
+                        "embedding":    vector,
+                    }))
+                })
+                .collect();
+            let count = chunks.len();
+            let dims = chunks
+                .first()
+                .and_then(|c| c.get("embedding"))
+                .and_then(|e| e.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            json!({ "ok": true, "chunks": chunks, "count": count, "dimensions": dims })
+        }
+        Err(e) => {
+            error!(?e, "rag_chunk_vectors: query failed");
             json!({ "error": format!("DB error: {}", e) })
         }
     }
