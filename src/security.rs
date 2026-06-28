@@ -261,6 +261,7 @@ impl SecurityConfig {
             | "kg_upsert_triples"
             | "kg_graph"
             | "kg_neighbors"
+            | "kg_clear"
             | "save_memory" => Ok(()),
             // Fail-closed: cualquier acción NO listada explícitamente se DENIEGA.
             // Antes `_ => Ok(())` dejaba abierta sin auth toda acción nueva que se

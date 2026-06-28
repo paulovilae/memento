@@ -400,6 +400,7 @@ async fn process_uds_stream(
             "kg_upsert_triples" => kg_store::upsert_triples(&pool, req.payload).await,
             "kg_graph" => kg_store::graph(&pool, req.payload).await,
             "kg_neighbors" => kg_store::neighbors(&pool, req.payload).await,
+            "kg_clear" => kg_store::clear(&pool, req.payload).await,
 
             // ─── Paulo Bio Data Actions ───────────────────────────────
             "query_bio" => bio::query_bio(&pool, req.payload).await,

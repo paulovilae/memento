@@ -467,6 +467,53 @@ pub async fn neighbors(pool: &sqlx::PgPool, payload: Value) -> Value {
     json!({ "ok": true, "entities": entities, "relations": relations, "entity_count": ec, "relation_count": rc })
 }
 
+// ─── kg_clear ─────────────────────────────────────────────────────────────────
+//
+// Delete the whole graph for a scope (entities + relations). Used before a full
+// re-extraction so stale / noisy nodes don't accumulate. Requires app_id to be
+// present (refuses to wipe the entire table on an empty scope).
+pub async fn clear(pool: &sqlx::PgPool, payload: Value) -> Value {
+    let app = opt_str(&payload, "app_id");
+    if app.is_none() {
+        return json!({ "error": "kg_clear requires app_id" });
+    }
+    let tenant = opt_str(&payload, "tenant_id");
+    let expert = opt_str(&payload, "expert_id");
+    let coll = opt_str(&payload, "collection");
+
+    let del = |table: &str| {
+        format!(
+            "DELETE FROM {table} \
+             WHERE ($1::text IS NULL OR app_id    = $1) \
+               AND ($2::text IS NULL OR tenant_id = $2) \
+               AND ($3::text IS NULL OR expert_id = $3) \
+               AND ($4::text IS NULL OR collection = $4)"
+        )
+    };
+    let rels = sqlx::query(&del("kg_relation"))
+        .bind(&app)
+        .bind(&tenant)
+        .bind(&expert)
+        .bind(&coll)
+        .execute(pool)
+        .await;
+    let ents = sqlx::query(&del("kg_entity"))
+        .bind(&app)
+        .bind(&tenant)
+        .bind(&expert)
+        .bind(&coll)
+        .execute(pool)
+        .await;
+    match (rels, ents) {
+        (Ok(r), Ok(e)) => json!({
+            "ok": true,
+            "relations_deleted": r.rows_affected(),
+            "entities_deleted": e.rows_affected()
+        }),
+        _ => json!({ "error": "kg_clear: DB error" }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
