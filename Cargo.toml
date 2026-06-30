@@ -51,7 +51,7 @@ tokio-stream = "0.1.15"
 
 
 walkdir = "2.5.0"
-pdf-extract = "0.10.0"
+pdf-extract = "0.12"
 calamine = "0.34.0"
 zip = "8.2.0"
 roxmltree = "0.21.1"

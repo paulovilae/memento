@@ -1,19 +1,19 @@
 // Module declarations
 mod deletion;
+mod derivation;
 mod embedding;
 mod helpers;
 mod parsing;
-mod derivation;
 mod stats;
 
 pub use deletion::delete_records;
 pub use stats::app_stats;
 
 // Import internal types and functions
+use derivation::*;
 use embedding::{cosine_similarity, parse_embedding, unpack_embedding};
 use helpers::*;
 use parsing::*;
-use derivation::*;
 
 // External dependencies
 use serde_json::Value;
@@ -578,7 +578,11 @@ pub async fn semantic_recall(pool: &sqlx::PgPool, payload: Value) -> Value {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let limit = clamp_i64(payload.get("limit").and_then(|v| v.as_i64()).unwrap_or(6), 1, 24);
+    let limit = clamp_i64(
+        payload.get("limit").and_then(|v| v.as_i64()).unwrap_or(6),
+        1,
+        24,
+    );
     // Pull a bounded candidate window (already scope-filtered) to rerank.
     let candidate_cap = clamp_i64(
         payload
@@ -1485,13 +1489,12 @@ mod tests {
         let cited_id = entries[0]["id"].clone();
 
         // recall_log should now hold one row keyed by request_id.
-        let log_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM recall_log WHERE request_id = $1",
-        )
-        .bind(&request_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let log_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM recall_log WHERE request_id = $1")
+                .bind(&request_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(log_count, 1, "recall_log did not record the call");
 
         // Feedback round-trip: report which id was cited.
@@ -1507,13 +1510,12 @@ mod tests {
         assert_eq!(fb["status"], "success", "recall_feedback: {}", fb);
         assert_eq!(fb["request_id"], request_id);
 
-        let fb_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM recall_feedback WHERE request_id = $1",
-        )
-        .bind(&request_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let fb_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM recall_feedback WHERE request_id = $1")
+                .bind(&request_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(fb_count, 1, "recall_feedback did not insert the row");
     }
 }

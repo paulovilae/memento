@@ -33,7 +33,9 @@ pub async fn extract_text(payload: Value) -> Value {
     // Anti path-traversal: canonicalizar y exigir que esté bajo la base permitida.
     let canon = match std::fs::canonicalize(&path) {
         Ok(p) => p,
-        Err(e) => return json!({ "error": format!("extract_text: no se pudo abrir '{path}': {e}") }),
+        Err(e) => {
+            return json!({ "error": format!("extract_text: no se pudo abrir '{path}': {e}") })
+        }
     };
     let base = extract_base();
     let base_canon = std::fs::canonicalize(&base).unwrap_or_else(|_| PathBuf::from(&base));
@@ -76,7 +78,9 @@ fn extract_docx(path: &Path) -> anyhow::Result<String> {
     let file = std::fs::File::open(path)?;
     let mut archive = zip::ZipArchive::new(file)?;
     let mut xml = String::new();
-    archive.by_name("word/document.xml")?.read_to_string(&mut xml)?;
+    archive
+        .by_name("word/document.xml")?
+        .read_to_string(&mut xml)?;
     Ok(collect_xml_text(&xml, "t"))
 }
 

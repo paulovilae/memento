@@ -205,7 +205,10 @@ pub(super) fn pack_embedding(arr: &[f32]) -> Vec<u8> {
 /// Extract the `embedding` array from the payload and pack it to BYTEA (None if absent/empty).
 fn embedding_bytes_from_payload(payload: &Value) -> Option<Vec<u8>> {
     let arr = payload.get("embedding")?.as_array()?;
-    let v: Vec<f32> = arr.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect();
+    let v: Vec<f32> = arr
+        .iter()
+        .filter_map(|x| x.as_f64().map(|f| f as f32))
+        .collect();
     if v.is_empty() {
         None
     } else {
@@ -261,7 +264,11 @@ pub(super) async fn insert_record_only(
         .await
 }
 
-pub(super) fn save_record_response(input: &SaveRecordInput, record_id: i32, derived: Vec<Value>) -> Value {
+pub(super) fn save_record_response(
+    input: &SaveRecordInput,
+    record_id: i32,
+    derived: Vec<Value>,
+) -> Value {
     serde_json::json!({
         "status": "success",
         "action": "memory_record_saved",

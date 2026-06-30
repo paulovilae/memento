@@ -272,7 +272,8 @@ fn rewrite_cartera_query(query: &str) -> String {
         let prefixed = format!(".company_name = '{}'", alias);
         if let Some(pos) = lower.find(&prefixed) {
             // Walk back to find the start of the alias (e.g. "d")
-            let alias_start = lower[..pos].rfind(|c: char| !c.is_alphanumeric() && c != '_')
+            let alias_start = lower[..pos]
+                .rfind(|c: char| !c.is_alphanumeric() && c != '_')
                 .map(|p| p + 1)
                 .unwrap_or(0);
             let end = pos + prefixed.len();
