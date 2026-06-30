@@ -64,14 +64,34 @@ community-summarization layer), and implemented it natively in Rust + Postgres.
 
 | Action | Purpose |
 |---|---|
-| `kg_upsert_triples` | Merge `entities` + `triples` into the graph (resolution + weight bump) |
+| `kg_upsert_triples` | Merge `entities` + `triples` (server-side resolution: canonical name + controlled type → variants collapse to one node) |
 | `kg_graph` | Full scoped subgraph (entities w/ embeddings + edges) — feeds the `graph-kit` viewer |
 | `kg_neighbors` | k-hop expansion from seed entities — graph retrieval |
+| `kg_centrality` | PageRank over the scoped graph (top-N important entities) — pure Rust, no LLM |
+| `kg_clear` | Wipe a scope's graph before a full re-extraction |
 
-> **Roadmap:** Phase 1 (this — graph store + resolution) is live. Phase 2 wires the
-> Hera triple-extractor + the RAG/durable-memory feeders. Phase 3 adds k-hop graph
-> retrieval into recall and the entity-level `<os-vector-map>` viewer. Temporal
-> (bi-temporal, Graphiti-style) edges come after, if memory needs time-travel.
+**Architecture — where the LLM lives (decided 2026-06-30).** Three layers, and
+Memento is deliberately the LLM-free one:
+
+```
+PRESENTATION   graph-kit <os-graph>           — draws (Sigma WebGL, PageRank, Louvain)
+PIPELINE (kit) os-rag-kit / os-knowledge-kit  — orchestrates Hera→canonicalize→store (LLM HERE)
+STORE+COMPUTE  Memento (this)                 — kg_* + resolution + PageRank/communities, NO LLM
+LLM RUNTIME    Hera                            — generate / embed
+```
+
+Memento **never calls the LLM**. Generating a graph from text (triple extraction,
+abstracts, co-mention) needs Hera and lives in the *pipeline kit* that sits above and
+writes into Memento — so the durable Postgres store is never coupled to the volatile
+GPU service and keeps serving recall even when Hera is busy/down. What Memento **does**
+own is everything computable without an LLM: entity **resolution/canonicalization**
+(so every writer dedups identically), graph algorithms (**PageRank** live; Louvain /
+shortest-path next), and the store itself. This keeps the knowledge graph a complete,
+reusable Memento capability — the moat — with the LLM strictly outside.
+
+> **Roadmap:** graph store + resolution + PageRank are live. Next: server-side Louvain
+> communities + shortest-path, k-hop retrieval wired into recall, and temporal
+> (bi-temporal, Graphiti-style) edges if memory needs time-travel.
 
 ### Open-source vs. commercial (positioning)
 

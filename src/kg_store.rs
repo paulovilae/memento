@@ -46,6 +46,28 @@ fn fnv1a64(s: &str) -> u64 {
     h
 }
 
+/// Canonical DISPLAY name: trim + drop a trailing legal/org suffix ("& Company",
+/// "Inc", "Ltd", "SAS", "S.A."…) so "McKinsey & Company" and "McKinsey" become one
+/// node. Case preserved. This is store-level resolution — every writer dedups the
+/// same way, not just one kit.
+fn canonical_name(raw: &str) -> String {
+    const SUFFIXES: &[&str] = &[
+        " & company", " and company", " & co", " & co.", " inc", " inc.", " llc",
+        " ltd", " ltd.", " limited", " s.a.", " sa", " s.a.s", " s.a.s.", " sas",
+        " corp", " corp.", " corporation", " co.", " gmbh", " plc",
+    ];
+    let mut s = raw.trim().trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':')).trim();
+    loop {
+        let lower = s.to_lowercase();
+        let cut = SUFFIXES.iter().find_map(|suf| lower.ends_with(suf).then(|| s.len() - suf.len()));
+        match cut {
+            Some(i) => s = s[..i].trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':')).trim(),
+            None => break,
+        }
+    }
+    s.to_string()
+}
+
 /// Lowercase, trim, collapse internal whitespace, strip surrounding punctuation —
 /// the resolution key so "Paulo Vila", "  paulo vila.", "PAULO  VILA" all merge.
 fn normalize_name(s: &str) -> String {
@@ -54,6 +76,37 @@ fn normalize_name(s: &str) -> String {
     collapsed
         .trim_matches(|c: char| !c.is_alphanumeric())
         .to_string()
+}
+
+/// Controlled type vocabulary so the SAME entity doesn't split across
+/// "institucion" / "organizacion" / "empresa".
+fn canonical_type(raw: &str) -> String {
+    let t = raw.trim().to_lowercase();
+    let t = t.trim_start_matches("a ").trim();
+    match t {
+        "organizacion" | "organización" | "organization" | "org" | "company" | "empresa"
+        | "institucion" | "institución" | "institution" | "university" | "universidad"
+        | "agency" | "agencia" | "gobierno" | "government" => "empresa",
+        "person" | "persona" | "people" | "individuo" => "persona",
+        "product" | "producto" | "project" | "proyecto" | "app" | "platform" | "plataforma" => "producto",
+        "technology" | "tecnologia" | "tecnología" | "tech" | "tool" | "herramienta"
+        | "framework" | "language" | "lenguaje" => "tecnologia",
+        "skill" | "habilidad" | "competencia" => "habilidad",
+        "place" | "lugar" | "city" | "ciudad" | "country" | "pais" | "país" | "region" | "región" => "lugar",
+        "role" | "cargo" | "title" | "titulo" | "título" | "job" | "position" | "puesto" => "cargo",
+        "certification" | "certificacion" | "certificación" | "certificate" | "certificado" => "certificacion",
+        "award" | "premio" | "prize" | "reconocimiento" => "premio",
+        "law" | "ley" | "articulo" | "artículo" | "clause" | "clausula" | "cláusula" | "contract" | "contrato" => "ley",
+        "date" | "fecha" | "year" | "año" => "fecha",
+        "" => "concepto",
+        other => {
+            if other.len() <= 16 && other.split_whitespace().count() == 1 {
+                return other.to_string();
+            }
+            "concepto"
+        }
+    }
+    .to_string()
 }
 
 fn opt_str(payload: &Value, key: &str) -> Option<String> {
@@ -128,16 +181,20 @@ pub async fn upsert_triples(pool: &sqlx::PgPool, payload: Value) -> Value {
         doc_id: &Option<String>,
         node: &Value,
     ) -> Option<String> {
-        let name = node.get("name").and_then(|v| v.as_str())?.trim();
+        let raw_name = node.get("name").and_then(|v| v.as_str())?.trim();
+        if raw_name.is_empty() {
+            return None;
+        }
+        // Store-level resolution: canonical display name + controlled type so variants
+        // collapse to one node regardless of which writer/kit sent them.
+        let name = canonical_name(raw_name);
         if name.is_empty() {
             return None;
         }
-        let etype = node
-            .get("type")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("concept")
-            .to_lowercase();
+        let etype = canonical_type(
+            node.get("type").and_then(|v| v.as_str()).unwrap_or("concepto"),
+        );
+        let name = name.as_str();
         let norm = normalize_name(name);
         if norm.is_empty() {
             return None;
@@ -465,6 +522,104 @@ pub async fn neighbors(pool: &sqlx::PgPool, payload: Value) -> Value {
     let ec = entities.len();
     let rc = relations.len();
     json!({ "ok": true, "entities": entities, "relations": relations, "entity_count": ec, "relation_count": rc })
+}
+
+// ─── kg_centrality ────────────────────────────────────────────────────────────
+//
+// PageRank over the scoped graph — "which entities matter most" — computed in Rust
+// (no LLM). Powers ranking in retrieval and the viewer. Payload: scope + top?
+// (default 20) + alpha? (default 0.85). Returns the top-N entities by score.
+pub async fn centrality(pool: &sqlx::PgPool, payload: Value) -> Value {
+    let app = opt_str(&payload, "app_id");
+    let tenant = opt_str(&payload, "tenant_id");
+    let expert = opt_str(&payload, "expert_id");
+    let coll = opt_str(&payload, "collection");
+    let top = payload.get("top").and_then(|v| v.as_i64()).unwrap_or(20).clamp(1, 500) as usize;
+    let alpha = payload.get("alpha").and_then(|v| v.as_f64()).unwrap_or(0.85) as f32;
+
+    let ents = sqlx::query(
+        "SELECT entity_id, name, entity_type, mention_count FROM kg_entity \
+         WHERE ($1::text IS NULL OR app_id = $1) AND ($2::text IS NULL OR tenant_id = $2) \
+           AND ($3::text IS NULL OR expert_id = $3) AND ($4::text IS NULL OR collection = $4)",
+    )
+    .bind(&app).bind(&tenant).bind(&expert).bind(&coll)
+    .fetch_all(pool).await.unwrap_or_default();
+    let n = ents.len();
+    if n == 0 {
+        return json!({ "ok": true, "top": [] });
+    }
+    let mut idx_of = std::collections::HashMap::with_capacity(n);
+    for (i, r) in ents.iter().enumerate() {
+        idx_of.insert(r.get::<String, _>("entity_id"), i);
+    }
+
+    let rels = sqlx::query(
+        "SELECT src_id, dst_id, weight FROM kg_relation \
+         WHERE ($1::text IS NULL OR app_id = $1) AND ($2::text IS NULL OR tenant_id = $2) \
+           AND ($3::text IS NULL OR expert_id = $3) AND ($4::text IS NULL OR collection = $4)",
+    )
+    .bind(&app).bind(&tenant).bind(&expert).bind(&coll)
+    .fetch_all(pool).await.unwrap_or_default();
+
+    let mut adj: Vec<Vec<(usize, f32)>> = vec![Vec::new(); n];
+    let mut out_w: Vec<f32> = vec![0.0; n];
+    for r in &rels {
+        let (Some(&si), Some(&di)) = (
+            idx_of.get(&r.get::<String, _>("src_id")),
+            idx_of.get(&r.get::<String, _>("dst_id")),
+        ) else {
+            continue;
+        };
+        if si == di {
+            continue;
+        }
+        let w = r.get::<f32, _>("weight").max(0.01);
+        adj[si].push((di, w));
+        adj[di].push((si, w)); // undirected
+        out_w[si] += w;
+        out_w[di] += w;
+    }
+
+    // Power iteration.
+    let base = 1.0 / n as f32;
+    let mut pr = vec![base; n];
+    for _ in 0..60 {
+        let mut next = vec![(1.0 - alpha) / n as f32; n];
+        let mut dangling = 0.0f32;
+        for i in 0..n {
+            if out_w[i] <= 0.0 {
+                dangling += pr[i];
+                continue;
+            }
+            let share = alpha * pr[i];
+            for &(j, w) in &adj[i] {
+                next[j] += share * (w / out_w[i]);
+            }
+        }
+        let spill = alpha * dangling / n as f32;
+        for v in &mut next {
+            *v += spill;
+        }
+        pr = next;
+    }
+
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| pr[b].partial_cmp(&pr[a]).unwrap_or(std::cmp::Ordering::Equal));
+    let top_list: Vec<Value> = order
+        .into_iter()
+        .take(top)
+        .map(|i| {
+            let r = &ents[i];
+            json!({
+                "entity_id": r.get::<String, _>("entity_id"),
+                "name": r.get::<String, _>("name"),
+                "entity_type": r.get::<String, _>("entity_type"),
+                "mention_count": r.get::<i32, _>("mention_count"),
+                "score": pr[i],
+            })
+        })
+        .collect();
+    json!({ "ok": true, "count": n, "top": top_list })
 }
 
 // ─── kg_clear ─────────────────────────────────────────────────────────────────
