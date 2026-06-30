@@ -280,17 +280,23 @@ pub async fn upsert_triples(pool: &sqlx::PgPool, payload: Value) -> Value {
                 .to_lowercase();
             let weight = tr.get("weight").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
             let evidence = tr.get("evidence").and_then(|v| v.as_str());
+            // Confidence: 'inferred' for deductions/co-mention, else 'extracted'.
+            let confidence = match tr.get("confidence").and_then(|v| v.as_str()) {
+                Some(c) if c.eq_ignore_ascii_case("inferred") => "inferred",
+                _ => "extracted",
+            };
             let rid = format!("r_{:016x}", fnv1a64(&format!("{skey}|{sid}|{did}|{rel}")));
             let source_kinds = json!([source_kind]);
 
             let res = sqlx::query(
                 "INSERT INTO kg_relation \
                    (relation_id, app_id, tenant_id, expert_id, collection, src_id, dst_id, \
-                    rel_type, weight, evidence, source_kinds) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) \
+                    rel_type, weight, evidence, confidence, source_kinds) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) \
                  ON CONFLICT (relation_id) DO UPDATE SET \
                    weight     = kg_relation.weight + EXCLUDED.weight, \
                    evidence   = COALESCE(EXCLUDED.evidence, kg_relation.evidence), \
+                   confidence = CASE WHEN kg_relation.confidence = 'extracted' THEN kg_relation.confidence ELSE EXCLUDED.confidence END, \
                    updated_at = CURRENT_TIMESTAMP",
             )
             .bind(&rid)
@@ -303,6 +309,7 @@ pub async fn upsert_triples(pool: &sqlx::PgPool, payload: Value) -> Value {
             .bind(&rel)
             .bind(weight)
             .bind(evidence)
+            .bind(confidence)
             .bind(&source_kinds)
             .execute(pool)
             .await;
@@ -381,7 +388,7 @@ pub async fn graph(pool: &sqlx::PgPool, payload: Value) -> Value {
         .collect();
 
     let rels = sqlx::query(
-        "SELECT src_id, dst_id, rel_type, weight, evidence \
+        "SELECT src_id, dst_id, rel_type, weight, evidence, confidence \
          FROM kg_relation \
          WHERE ($1::text IS NULL OR app_id    = $1) \
            AND ($2::text IS NULL OR tenant_id = $2) \
@@ -412,6 +419,7 @@ pub async fn graph(pool: &sqlx::PgPool, payload: Value) -> Value {
                 "rel_type": r.get::<String, _>("rel_type"),
                 "weight":   r.get::<f32, _>("weight"),
                 "evidence": r.get::<Option<String>, _>("evidence"),
+                "confidence": r.get::<String, _>("confidence"),
             }))
         })
         .collect();
@@ -494,7 +502,7 @@ pub async fn neighbors(pool: &sqlx::PgPool, payload: Value) -> Value {
     let id_set: std::collections::HashSet<&String> = ids.iter().collect();
 
     let rels = sqlx::query(
-        "SELECT src_id, dst_id, rel_type, weight, evidence FROM kg_relation \
+        "SELECT src_id, dst_id, rel_type, weight, evidence, confidence FROM kg_relation \
          WHERE src_id = ANY($1) AND dst_id = ANY($1) ORDER BY weight DESC",
     )
     .bind(&ids)
@@ -515,6 +523,7 @@ pub async fn neighbors(pool: &sqlx::PgPool, payload: Value) -> Value {
                 "rel_type": r.get::<String, _>("rel_type"),
                 "weight": r.get::<f32, _>("weight"),
                 "evidence": r.get::<Option<String>, _>("evidence"),
+                "confidence": r.get::<String, _>("confidence"),
             }))
         })
         .collect();

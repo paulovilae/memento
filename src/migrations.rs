@@ -701,6 +701,15 @@ pub async fn run_all(pool: &sqlx::PgPool) -> anyhow::Result<()> {
         migration_12_knowledge_graph(pool),
     )
     .await?;
+    run_migration(pool, 13, "kg_relation_confidence", migration_13_kg_confidence(pool)).await?;
 
+    Ok(())
+}
+
+/// Legal-grade provenance: each relation gets a confidence level
+/// ('extracted' = explicitly stated in the source, 'inferred' = deduced /
+/// co-mention). `evidence` (verbatim citation) already exists from migration 12.
+async fn migration_13_kg_confidence(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    ensure_pg_column(pool, "kg_relation", "confidence", "TEXT NOT NULL DEFAULT 'extracted'").await?;
     Ok(())
 }
