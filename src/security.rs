@@ -265,7 +265,15 @@ impl SecurityConfig {
             | "kg_centrality"
             | "kg_path"
             | "kg_communities"
+            // Hera usage kit: log + check are best-effort per-request (open to any
+            // authenticated Hera caller); stats is gated to privileged clients below.
+            | "hera_log_usage"
+            | "hera_check_limit"
             | "save_memory" => Ok(()),
+            "hera_usage_stats" => {
+                self.authenticate_client(client, &self.privileged_clients, action)?;
+                Ok(())
+            }
             // Fail-closed: cualquier acción NO listada explícitamente se DENIEGA.
             // Antes `_ => Ok(())` dejaba abierta sin auth toda acción nueva que se
             // añadiera al dispatcher. Si agregas una acción nueva, lístala arriba.

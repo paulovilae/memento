@@ -702,6 +702,7 @@ pub async fn run_all(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     )
     .await?;
     run_migration(pool, 13, "kg_relation_confidence", migration_13_kg_confidence(pool)).await?;
+    run_migration(pool, 14, "hera_usage_kit", migration_14_hera_usage(pool)).await?;
 
     Ok(())
 }
@@ -711,5 +712,61 @@ pub async fn run_all(pool: &sqlx::PgPool) -> anyhow::Result<()> {
 /// co-mention). `evidence` (verbatim citation) already exists from migration 12.
 async fn migration_13_kg_confidence(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     ensure_pg_column(pool, "kg_relation", "confidence", "TEXT NOT NULL DEFAULT 'extracted'").await?;
+    Ok(())
+}
+
+/// Hera usage measurement: per-request event log + configurable daily limits.
+async fn migration_14_hera_usage(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS hera_usage_events (
+            id                BIGSERIAL PRIMARY KEY,
+            ts                TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            app_id            TEXT NOT NULL DEFAULT '',
+            user_id           TEXT NOT NULL DEFAULT 'anonymous',
+            session_id        TEXT NOT NULL DEFAULT '',
+            route_profile     TEXT NOT NULL DEFAULT '',
+            model             TEXT NOT NULL DEFAULT '',
+            prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens      INTEGER NOT NULL DEFAULT 0,
+            is_cloud          BOOLEAN NOT NULL DEFAULT false,
+            latency_ms        INTEGER
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_hera_usage_app_ts \
+         ON hera_usage_events(app_id, ts DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_hera_usage_user_ts \
+         ON hera_usage_events(user_id, ts DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS hera_usage_limits (
+            id          BIGSERIAL PRIMARY KEY,
+            app_id      TEXT NOT NULL,
+            user_id     TEXT,
+            limit_kind  TEXT NOT NULL,
+            limit_value INTEGER NOT NULL,
+            created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(app_id, COALESCE(user_id, ''), limit_kind)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }

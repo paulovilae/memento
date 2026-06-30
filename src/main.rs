@@ -21,6 +21,7 @@ mod ingestion;
 mod interaction_memory;
 mod kg_store;
 mod knowledge;
+mod usage_store;
 mod metrics;
 mod migrations;
 mod query_cache;
@@ -404,6 +405,11 @@ async fn process_uds_stream(
             "kg_centrality" => kg_store::centrality(&pool, req.payload).await,
             "kg_path" => kg_store::path(&pool, req.payload).await,
             "kg_communities" => kg_store::communities(&pool, req.payload).await,
+
+            // ─── Hera Usage Kit ───────────────────────────────────────
+            "hera_log_usage" => usage_store::hera_log_usage(&pool, &req.payload).await,
+            "hera_check_limit" => usage_store::hera_check_limit(&pool, &req.payload).await,
+            "hera_usage_stats" => usage_store::hera_usage_stats(&pool, &req.payload).await,
 
             // ─── Paulo Bio Data Actions ───────────────────────────────
             "query_bio" => bio::query_bio(&pool, req.payload).await,
