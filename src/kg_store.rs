@@ -622,6 +622,179 @@ pub async fn centrality(pool: &sqlx::PgPool, payload: Value) -> Value {
     json!({ "ok": true, "count": n, "top": top_list })
 }
 
+// Load the scoped graph as (entities: id→(name, mention), undirected adjacency).
+async fn load_scope_graph(
+    pool: &sqlx::PgPool,
+    app: &Option<String>,
+    tenant: &Option<String>,
+    expert: &Option<String>,
+    coll: &Option<String>,
+) -> (Vec<(String, String, i32)>, std::collections::HashMap<String, Vec<(String, f32)>>) {
+    let ents = sqlx::query(
+        "SELECT entity_id, name, mention_count FROM kg_entity \
+         WHERE ($1::text IS NULL OR app_id = $1) AND ($2::text IS NULL OR tenant_id = $2) \
+           AND ($3::text IS NULL OR expert_id = $3) AND ($4::text IS NULL OR collection = $4)",
+    )
+    .bind(app).bind(tenant).bind(expert).bind(coll)
+    .fetch_all(pool).await.unwrap_or_default();
+    let entities: Vec<(String, String, i32)> = ents
+        .iter()
+        .map(|r| (r.get::<String, _>("entity_id"), r.get::<String, _>("name"), r.get::<i32, _>("mention_count")))
+        .collect();
+    let valid: std::collections::HashSet<&String> = entities.iter().map(|(id, _, _)| id).collect();
+    let rels = sqlx::query(
+        "SELECT src_id, dst_id, weight FROM kg_relation \
+         WHERE ($1::text IS NULL OR app_id = $1) AND ($2::text IS NULL OR tenant_id = $2) \
+           AND ($3::text IS NULL OR expert_id = $3) AND ($4::text IS NULL OR collection = $4)",
+    )
+    .bind(app).bind(tenant).bind(expert).bind(coll)
+    .fetch_all(pool).await.unwrap_or_default();
+    let mut adj: std::collections::HashMap<String, Vec<(String, f32)>> = std::collections::HashMap::new();
+    for r in &rels {
+        let s = r.get::<String, _>("src_id");
+        let d = r.get::<String, _>("dst_id");
+        if s == d || !valid.contains(&s) || !valid.contains(&d) {
+            continue;
+        }
+        let w = r.get::<f32, _>("weight").max(0.01);
+        adj.entry(s.clone()).or_default().push((d.clone(), w));
+        adj.entry(d).or_default().push((s, w));
+    }
+    (entities, adj)
+}
+
+// ─── kg_path ──────────────────────────────────────────────────────────────────
+//
+// Shortest path between two entities (BFS over the undirected graph). "How is X
+// related to Y?" Payload: scope + from + to (entity_ids) + max_hops? (default 5).
+pub async fn path(pool: &sqlx::PgPool, payload: Value) -> Value {
+    let app = opt_str(&payload, "app_id");
+    let tenant = opt_str(&payload, "tenant_id");
+    let expert = opt_str(&payload, "expert_id");
+    let coll = opt_str(&payload, "collection");
+    let (Some(from), Some(to)) = (opt_str(&payload, "from"), opt_str(&payload, "to")) else {
+        return json!({ "error": "kg_path requires from + to entity_ids" });
+    };
+    let max_hops = payload.get("max_hops").and_then(|v| v.as_i64()).unwrap_or(5).clamp(1, 8) as usize;
+
+    let (entities, adj) = load_scope_graph(pool, &app, &tenant, &expert, &coll).await;
+    let name_of: std::collections::HashMap<&str, &str> =
+        entities.iter().map(|(id, n, _)| (id.as_str(), n.as_str())).collect();
+
+    // BFS with predecessor tracking, bounded by max_hops.
+    let mut prev: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut depth: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut queue = std::collections::VecDeque::new();
+    depth.insert(from.clone(), 0);
+    queue.push_back(from.clone());
+    let mut found = false;
+    while let Some(cur) = queue.pop_front() {
+        if cur == to {
+            found = true;
+            break;
+        }
+        let d = depth[&cur];
+        if d >= max_hops {
+            continue;
+        }
+        if let Some(nbrs) = adj.get(&cur) {
+            for (nb, _) in nbrs {
+                if !depth.contains_key(nb) {
+                    depth.insert(nb.clone(), d + 1);
+                    prev.insert(nb.clone(), cur.clone());
+                    queue.push_back(nb.clone());
+                }
+            }
+        }
+    }
+    if !found {
+        return json!({ "ok": true, "found": false, "path": [] });
+    }
+    let mut chain = vec![to.clone()];
+    let mut node = to;
+    while let Some(p) = prev.get(&node) {
+        chain.push(p.clone());
+        node = p.clone();
+    }
+    chain.reverse();
+    let path: Vec<Value> = chain
+        .iter()
+        .map(|id| json!({ "entity_id": id, "name": name_of.get(id.as_str()).copied().unwrap_or("?") }))
+        .collect();
+    let len = path.len().saturating_sub(1);
+    json!({ "ok": true, "found": true, "length": len, "path": path })
+}
+
+// ─── kg_communities ───────────────────────────────────────────────────────────
+//
+// Cluster entities by label propagation (no LLM) — "idea groups". Each community is
+// named by its highest-mention member. Payload: scope + min_size? (default 2).
+pub async fn communities(pool: &sqlx::PgPool, payload: Value) -> Value {
+    let app = opt_str(&payload, "app_id");
+    let tenant = opt_str(&payload, "tenant_id");
+    let expert = opt_str(&payload, "expert_id");
+    let coll = opt_str(&payload, "collection");
+    let min_size = payload.get("min_size").and_then(|v| v.as_i64()).unwrap_or(2).max(1) as usize;
+
+    let (entities, adj) = load_scope_graph(pool, &app, &tenant, &expert, &coll).await;
+    let n = entities.len();
+    if n == 0 {
+        return json!({ "ok": true, "communities": [] });
+    }
+    let idx_of: std::collections::HashMap<&str, usize> =
+        entities.iter().enumerate().map(|(i, (id, _, _))| (id.as_str(), i)).collect();
+    // Label propagation: each node adopts the highest-weight label among neighbors.
+    let mut label: Vec<usize> = (0..n).collect();
+    for _ in 0..14 {
+        let mut changed = false;
+        for i in 0..n {
+            let id = entities[i].0.as_str();
+            let Some(nbrs) = adj.get(id) else { continue };
+            let mut tally: std::collections::HashMap<usize, f32> = std::collections::HashMap::new();
+            for (nb, w) in nbrs {
+                if let Some(&j) = idx_of.get(nb.as_str()) {
+                    *tally.entry(label[j]).or_insert(0.0) += *w;
+                }
+            }
+            if let Some((&best, _)) = tally
+                .iter()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal).then(b.0.cmp(a.0)))
+            {
+                if label[i] != best {
+                    label[i] = best;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    // Group + name by highest-mention member.
+    let mut groups: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+    for i in 0..n {
+        groups.entry(label[i]).or_default().push(i);
+    }
+    let mut out: Vec<Value> = groups
+        .values()
+        .filter(|members| members.len() >= min_size)
+        .map(|members| {
+            let top = members
+                .iter()
+                .max_by_key(|&&i| entities[i].2)
+                .copied()
+                .unwrap_or(members[0]);
+            json!({
+                "name": entities[top].1,
+                "size": members.len(),
+                "members": members.iter().map(|&i| entities[i].0.clone()).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| b["size"].as_u64().cmp(&a["size"].as_u64()));
+    json!({ "ok": true, "count": out.len(), "communities": out })
+}
+
 // ─── kg_clear ─────────────────────────────────────────────────────────────────
 //
 // Delete the whole graph for a scope (entities + relations). Used before a full

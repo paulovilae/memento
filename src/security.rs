@@ -263,6 +263,8 @@ impl SecurityConfig {
             | "kg_neighbors"
             | "kg_clear"
             | "kg_centrality"
+            | "kg_path"
+            | "kg_communities"
             | "save_memory" => Ok(()),
             // Fail-closed: cualquier acción NO listada explícitamente se DENIEGA.
             // Antes `_ => Ok(())` dejaba abierta sin auth toda acción nueva que se

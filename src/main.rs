@@ -402,6 +402,8 @@ async fn process_uds_stream(
             "kg_neighbors" => kg_store::neighbors(&pool, req.payload).await,
             "kg_clear" => kg_store::clear(&pool, req.payload).await,
             "kg_centrality" => kg_store::centrality(&pool, req.payload).await,
+            "kg_path" => kg_store::path(&pool, req.payload).await,
+            "kg_communities" => kg_store::communities(&pool, req.payload).await,
 
             // ─── Paulo Bio Data Actions ───────────────────────────────
             "query_bio" => bio::query_bio(&pool, req.payload).await,
