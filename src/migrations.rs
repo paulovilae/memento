@@ -760,10 +760,18 @@ async fn migration_14_hera_usage(pool: &sqlx::PgPool) -> anyhow::Result<()> {
             user_id     TEXT,
             limit_kind  TEXT NOT NULL,
             limit_value INTEGER NOT NULL,
-            created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(app_id, COALESCE(user_id, ''), limit_kind)
+            created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Expression-based UNIQUE must be a separate index (function calls not valid
+    // inside a table-level UNIQUE constraint on PG < 15).
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_hera_usage_limits_uniq \
+         ON hera_usage_limits(app_id, COALESCE(user_id, ''), limit_kind)",
     )
     .execute(pool)
     .await?;

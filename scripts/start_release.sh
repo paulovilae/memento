@@ -18,8 +18,11 @@ if [[ -f "./target/release/${BIN}" ]]; then
     timeout 5 "./target/release/${BIN}" --help >/dev/null 2>&1
     probe_status=$?
     set -e
-    if [[ "${probe_status}" != "0" && "${probe_status}" != "124" ]]; then
-        echo "[imaginos] ${BIN}: binary cannot run on this host — removing it"
+    # Only remove on exec-failure codes (126=permission/linker, 127=not-found).
+    # Exit 1 = runtime error (socket in use, DB not ready) — keep the binary.
+    # Exit 124 = killed by timeout — normal for a daemon with no --help flag.
+    if [[ "${probe_status}" == "126" || "${probe_status}" == "127" ]]; then
+        echo "[imaginos] ${BIN}: binary cannot run on this host (exit ${probe_status}) — removing it"
         rm -f "./target/release/${BIN}"
     fi
 fi
@@ -37,6 +40,12 @@ if [[ ! -x "./target/release/${BIN}" ]]; then
         echo "[imaginos] build ${BIN} ahead of time or set IMAGINOS_ALLOW_RELEASE_BUILD=1 for an emergency rebuild"
         exit 1
     fi
+fi
+
+# Clean up a stale socket left by the probe or a previous crash before binding.
+MEMENTO_SOCKET="${MEMENTO_SOCKET:-/tmp/memento.sock}"
+if [[ -S "${MEMENTO_SOCKET}" ]]; then
+    rm -f "${MEMENTO_SOCKET}"
 fi
 
 exec "./target/release/${BIN}"
