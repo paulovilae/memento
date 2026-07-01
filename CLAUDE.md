@@ -70,6 +70,7 @@ Memento/
     │   ├── parsing.rs             — SaveRecordInput, INSERT, embedding persistence
     │   └── derivation.rs          — recursive summary building, scoring, fetch_scoped_rows
     ├── runtime_memory.rs          — preflight + observations + learned-hint promotion
+    ├── kg_store.rs                — SOVEREIGN KNOWLEDGE GRAPH (relational/graph RAG): kg_entity + kg_relation, entity resolution, kg_upsert_triples / kg_graph / kg_neighbors. The differentiator — see README "What makes Memento different". Fed by RAG + DURABLE memory, never raw turns.
     ├── knowledge.rs               — knowledge_store CRUD + search
     ├── interaction_memory.rs      — Bayesian priors/posteriors
     ├── document_index*.rs         — document parsing + indexed retrieval

@@ -13,12 +13,15 @@ mod audit;
 mod bio;
 mod chat_memory;
 pub mod config;
+mod doc_extract;
 mod document_index;
 mod document_index_ipc;
 mod hardware;
 mod ingestion;
 mod interaction_memory;
+mod kg_store;
 mod knowledge;
+mod usage_store;
 mod metrics;
 mod migrations;
 mod query_cache;
@@ -94,8 +97,8 @@ async fn main() -> anyhow::Result<()> {
     // Default is `/tmp/memento.sock` (what every client hardcodes); tests/dev can
     // point to a private path via MEMENTO_SOCKET_PATH so they don't clobber a
     // running production daemon on the same machine.
-    let socket_path_owned = std::env::var("MEMENTO_SOCKET_PATH")
-        .unwrap_or_else(|_| "/tmp/memento.sock".to_string());
+    let socket_path_owned =
+        std::env::var("MEMENTO_SOCKET_PATH").unwrap_or_else(|_| "/tmp/memento.sock".to_string());
     let socket_path = socket_path_owned.as_str();
 
     // Clean up old socket if it exists
@@ -150,21 +153,40 @@ async fn process_uds_stream(
     apps: AppConnections,
     security: SecurityConfig,
 ) -> anyhow::Result<()> {
-    let mut buffer = vec![0; 8192 * 4];
+    // Acumula el mensaje COMPLETO antes de parsear: un request puede superar un solo chunk de 32 KB
+    // (p.ej. `rag_ingest_document` de un documento grande con texto + embeddings). Leemos en bucle
+    // hasta que el JSON sea parseable o hasta EOF. Los clientes hacen un request por conexión
+    // (write + shutdown del lado de escritura), así que el cierre marca el fin del mensaje y el
+    // try-parse permite responder en cuanto el JSON está completo aunque el cliente no cierre.
+    let mut chunk = vec![0u8; 8192 * 4];
+    const MAX_MSG: usize = 64 * 1024 * 1024; // backstop anti-OOM (64 MB)
     loop {
-        let n = stream.read(&mut buffer).await?;
-        if n == 0 {
-            break;
-        }
-
-        let msg_str = std::str::from_utf8(&buffer[..n])?;
-
-        let req: IpcMessage = match serde_json::from_str(msg_str) {
-            Ok(r) => r,
-            Err(e) => {
-                let err_res = serde_json::json!({ "error": format!("Invalid JSON: {}", e) });
+        let mut buffer: Vec<u8> = Vec::new();
+        let req: IpcMessage = loop {
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                if buffer.is_empty() {
+                    return Ok(()); // conexión cerrada limpiamente, sin mensaje pendiente
+                }
+                match serde_json::from_slice(&buffer) {
+                    Ok(parsed) => break parsed,
+                    Err(e) => {
+                        let err_res =
+                            serde_json::json!({ "error": format!("Invalid JSON: {}", e) });
+                        let _ = stream.write_all(err_res.to_string().as_bytes()).await;
+                        return Ok(());
+                    }
+                }
+            }
+            buffer.extend_from_slice(&chunk[..n]);
+            if buffer.len() > MAX_MSG {
+                let err_res = serde_json::json!({ "error": "request too large" });
                 let _ = stream.write_all(err_res.to_string().as_bytes()).await;
-                continue;
+                return Ok(());
+            }
+            // ¿JSON completo ya? Si aún no parsea (mensaje incompleto), seguimos leyendo.
+            if let Ok(parsed) = serde_json::from_slice::<IpcMessage>(&buffer) {
+                break parsed;
             }
         };
 
@@ -328,15 +350,16 @@ async fn process_uds_stream(
 
             "delete_scoped_memory" => {
                 // Accept both { "ids": [1,2,3] } and { "id": 1 }; normalise to Vec<i32>.
-                let ids: Vec<i32> = if let Some(arr) = req.payload.get("ids").and_then(|v| v.as_array()) {
-                    arr.iter()
-                        .filter_map(|v| v.as_i64().map(|n| n as i32))
-                        .collect()
-                } else if let Some(single) = req.payload.get("id").and_then(|v| v.as_i64()) {
-                    vec![single as i32]
-                } else {
-                    Vec::new()
-                };
+                let ids: Vec<i32> =
+                    if let Some(arr) = req.payload.get("ids").and_then(|v| v.as_array()) {
+                        arr.iter()
+                            .filter_map(|v| v.as_i64().map(|n| n as i32))
+                            .collect()
+                    } else if let Some(single) = req.payload.get("id").and_then(|v| v.as_i64()) {
+                        vec![single as i32]
+                    } else {
+                        Vec::new()
+                    };
                 scoped_memory::delete_records(&pool, ids).await
             }
 
@@ -362,6 +385,9 @@ async fn process_uds_stream(
             "list_document_indexes" => document_index_ipc::list(&pool, req.payload).await,
             "query_document_index" => document_index_ipc::query(&pool, req.payload).await,
 
+            // ─── Conversor de documentos (path → texto; ver doc_extract.rs) ──
+            "extract_text" => doc_extract::extract_text(req.payload).await,
+
             // ─── RAG Document Store ───────────────────────────────────────
             "rag_ingest_document" => rag_store::ingest_document(&pool, req.payload).await,
             "rag_list_documents" => rag_store::list_documents(&pool, req.payload).await,
@@ -371,6 +397,19 @@ async fn process_uds_stream(
             "rag_delete_document" => rag_store::delete_document(&pool, req.payload).await,
             "rag_search" => rag_store::search(&pool, req.payload).await,
             "rag_pinned" => rag_store::pinned(&pool, req.payload).await,
+            "rag_chunk_vectors" => rag_store::chunk_vectors(&pool, req.payload).await,
+            "kg_upsert_triples" => kg_store::upsert_triples(&pool, req.payload).await,
+            "kg_graph" => kg_store::graph(&pool, req.payload).await,
+            "kg_neighbors" => kg_store::neighbors(&pool, req.payload).await,
+            "kg_clear" => kg_store::clear(&pool, req.payload).await,
+            "kg_centrality" => kg_store::centrality(&pool, req.payload).await,
+            "kg_path" => kg_store::path(&pool, req.payload).await,
+            "kg_communities" => kg_store::communities(&pool, req.payload).await,
+
+            // ─── Hera Usage Kit ───────────────────────────────────────
+            "hera_log_usage" => usage_store::hera_log_usage(&pool, &req.payload).await,
+            "hera_check_limit" => usage_store::hera_check_limit(&pool, &req.payload).await,
+            "hera_usage_stats" => usage_store::hera_usage_stats(&pool, &req.payload).await,
 
             // ─── Paulo Bio Data Actions ───────────────────────────────
             "query_bio" => bio::query_bio(&pool, req.payload).await,
@@ -417,7 +456,7 @@ async fn process_uds_stream(
         if let Err(e) = stream.write_all(response.to_string().as_bytes()).await {
             error!("Failed to send IPC response: {}", e);
         }
+        // El bucle continúa: una conexión puede traer más requests (secuenciales). El cierre del
+        // cliente (read → 0 con buffer vacío) sale de la función con Ok más arriba.
     }
-
-    Ok(())
 }

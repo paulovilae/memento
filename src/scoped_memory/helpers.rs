@@ -296,7 +296,10 @@ pub(super) fn row_timestamp_string(row: &sqlx::postgres::PgRow, column: &str) ->
     format_timestamp(row.get::<chrono::NaiveDateTime, _>(column))
 }
 
-pub(super) fn row_optional_timestamp_string(row: &sqlx::postgres::PgRow, column: &str) -> Option<String> {
+pub(super) fn row_optional_timestamp_string(
+    row: &sqlx::postgres::PgRow,
+    column: &str,
+) -> Option<String> {
     row.get::<Option<chrono::NaiveDateTime>, _>(column)
         .map(format_timestamp)
 }

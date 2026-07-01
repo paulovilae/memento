@@ -246,7 +246,34 @@ impl SecurityConfig {
             | "record_context_feedback"
             | "semantic_recall"
             | "vector_search"
+            | "extract_text"
+            // RAG document store (os-rag-kit): aislado por scope app_id/tenant_id en el payload,
+            // mismo criterio que vector_search/semantic_recall. rag-kit llama sin token de cliente.
+            | "rag_ingest_document"
+            | "rag_list_documents"
+            | "rag_get_document"
+            | "rag_update_document"
+            | "rag_reembed_document"
+            | "rag_delete_document"
+            | "rag_search"
+            | "rag_pinned"
+            | "rag_chunk_vectors"
+            | "kg_upsert_triples"
+            | "kg_graph"
+            | "kg_neighbors"
+            | "kg_clear"
+            | "kg_centrality"
+            | "kg_path"
+            | "kg_communities"
+            // Hera usage kit: log + check are best-effort per-request (open to any
+            // authenticated Hera caller); stats is gated to privileged clients below.
+            | "hera_log_usage"
+            | "hera_check_limit"
             | "save_memory" => Ok(()),
+            "hera_usage_stats" => {
+                self.authenticate_client(client, &self.privileged_clients, action)?;
+                Ok(())
+            }
             // Fail-closed: cualquier acción NO listada explícitamente se DENIEGA.
             // Antes `_ => Ok(())` dejaba abierta sin auth toda acción nueva que se
             // añadiera al dispatcher. Si agregas una acción nueva, lístala arriba.

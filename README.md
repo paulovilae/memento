@@ -28,6 +28,83 @@ Mandatory rule:
 
 ---
 
+## What makes Memento different — the Knowledge Graph (relational memory)
+
+> **This is the edge.** Most "memory" layers for LLM apps are a vector index over
+> text chunks: you embed slices of text, cosine-match them, and paste the top-k
+> into a prompt. That is flat retrieval — it has no idea that two chunks talk about
+> the *same person*, that a fact *contradicts* an earlier one, or that a clause
+> *applies to* another. **Memento adds a sovereign knowledge graph on top of its
+> memory tiers**, so recall is *relational*, not just *similar*.
+
+**One graph per scope, fed by two sources** (`src/kg_store.rs`, migration 12):
+
+- **RAG documents** — entities + relations extracted from `rag_chunk`.
+- **Durable memory** — facts / decisions / summaries promoted in `scoped_memory`.
+- **NOT** raw chat turns (too noisy — the graph is fed from the *durable* layer).
+
+Both feeders resolve into the same `kg_entity` / `kg_relation` tables. So a fact
+stated in a chat, an entity in a CV, and a clause in a contract about the *same*
+company collapse into **one node**, and a question can *hop* across them.
+
+**Entity resolution is built in:** entities are deduped by normalized name + type
+within a scope (`"Paulo Vila"`, `"PAULO  vila."`, `"paulo vila"` → one node, with a
+running `mention_count`). This is what turns "N text chunks" into "the ideas and
+how they relate".
+
+**Sovereign + cheap.** The expensive part of graph-RAG (GraphRAG/LightRAG-style) is
+the LLM that extracts `(entity, relation, entity)` triples on every chunk. On a
+cloud API that is a real bill; on our stack the extractor is **Hera, local on
+genesis (2× RTX 3090)** — GPU time, ~0 cloud tokens. Same "caller supplies the
+embedding" contract as the RAG store. No Python framework is vendored: we copied
+the *method* (LightRAG-style entity+relation graph, skipping the costly global
+community-summarization layer), and implemented it natively in Rust + Postgres.
+
+**KG IPC actions** (scope = `app_id` / `tenant_id` / `expert_id` / `collection`):
+
+| Action | Purpose |
+|---|---|
+| `kg_upsert_triples` | Merge `entities` + `triples` (server-side resolution: canonical name + controlled type → variants collapse to one node) |
+| `kg_graph` | Full scoped subgraph (entities w/ embeddings + edges) — feeds the `graph-kit` viewer |
+| `kg_neighbors` | k-hop expansion from seed entities — graph retrieval |
+| `kg_centrality` | PageRank over the scoped graph (top-N important entities) — pure Rust, no LLM |
+| `kg_clear` | Wipe a scope's graph before a full re-extraction |
+
+**Architecture — where the LLM lives (decided 2026-06-30).** Three layers, and
+Memento is deliberately the LLM-free one:
+
+```
+PRESENTATION   graph-kit <os-graph>           — draws (Sigma WebGL, PageRank, Louvain)
+PIPELINE (kit) os-rag-kit / os-knowledge-kit  — orchestrates Hera→canonicalize→store (LLM HERE)
+STORE+COMPUTE  Memento (this)                 — kg_* + resolution + PageRank/communities, NO LLM
+LLM RUNTIME    Hera                            — generate / embed
+```
+
+Memento **never calls the LLM**. Generating a graph from text (triple extraction,
+abstracts, co-mention) needs Hera and lives in the *pipeline kit* that sits above and
+writes into Memento — so the durable Postgres store is never coupled to the volatile
+GPU service and keeps serving recall even when Hera is busy/down. What Memento **does**
+own is everything computable without an LLM: entity **resolution/canonicalization**
+(so every writer dedups identically), graph algorithms (**PageRank** live; Louvain /
+shortest-path next), and the store itself. This keeps the knowledge graph a complete,
+reusable Memento capability — the moat — with the LLM strictly outside.
+
+> **Roadmap:** graph store + resolution + PageRank are live. Next: server-side Louvain
+> communities + shortest-path, k-hop retrieval wired into recall, and temporal
+> (bi-temporal, Graphiti-style) edges if memory needs time-travel.
+
+### Open-source vs. commercial (positioning)
+
+Memento's **protocol, the five memory tiers, and the basic stores** are the open,
+sovereign *standard* (consistent with the platform open-core stance: the OS is an
+open white-label standard; the differentiating layers are the product). The
+**relational knowledge-graph layer is the moat** — it is what makes Memento more
+than a vector cache. Treat it as the commercial / premium edge of the open core;
+do not casually re-document it as "just another store". When this decision is
+finalized, record it here and in the platform open-core note.
+
+---
+
 ## Architecture
 
 ```

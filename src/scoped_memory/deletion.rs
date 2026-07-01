@@ -14,12 +14,10 @@ pub async fn delete_records(pool: &sqlx::PgPool, ids: Vec<i32>) -> Value {
         return serde_json::json!({ "status": "error", "message": "no ids provided" });
     }
 
-    match sqlx::query_scalar::<_, i64>(
-        "DELETE FROM scoped_memory WHERE id = ANY($1) RETURNING id",
-    )
-    .bind(&ids)
-    .fetch_all(pool)
-    .await
+    match sqlx::query_scalar::<_, i64>("DELETE FROM scoped_memory WHERE id = ANY($1) RETURNING id")
+        .bind(&ids)
+        .fetch_all(pool)
+        .await
     {
         Ok(deleted_ids) => {
             crate::query_cache::invalidate_all();

@@ -1,7 +1,7 @@
-#[allow(unused_imports)]
-use super::*;
 use super::helpers::*;
 use super::parsing::*;
+#[allow(unused_imports)]
+use super::*;
 use serde_json::Value;
 use sqlx::Row;
 use std::collections::HashSet;
@@ -595,4 +595,3 @@ pub(super) async fn touch_usage(pool: &sqlx::PgPool, ids: &[i32]) -> Result<(), 
 
     Ok(())
 }
-
