@@ -703,6 +703,13 @@ pub async fn run_all(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     .await?;
     run_migration(pool, 13, "kg_relation_confidence", migration_13_kg_confidence(pool)).await?;
     run_migration(pool, 14, "hera_usage_kit", migration_14_hera_usage(pool)).await?;
+    run_migration(
+        pool,
+        15,
+        "hera_tool_calls",
+        migration_15_hera_tool_calls(pool),
+    )
+    .await?;
 
     Ok(())
 }
@@ -775,6 +782,70 @@ async fn migration_14_hera_usage(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     )
     .execute(pool)
     .await?;
+
+    Ok(())
+}
+
+/// Per-tool-call durable telemetry — the missing observability grain.
+///
+/// Before this, tool execution was fire-and-forget (stdout only) and the only
+/// persisted trace of tool activity was `hera_llm_audit.jsonl`'s bare
+/// `tool_call_count` integer. This table records one row per individual tool
+/// invocation (name, args, result preview, duration, success) keyed by
+/// `trace_id`, so a request can be reconstructed end-to-end and `/admin/hera/tools`
+/// can show real per-tool counts / latency / error rate.
+///
+/// Also backfills `trace_id` + `node` onto `hera_usage_events` so the durable
+/// billing sink shares the join key with this table and the /tmp audit jsonl.
+async fn migration_15_hera_tool_calls(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS hera_tool_calls (
+            id             BIGSERIAL PRIMARY KEY,
+            ts             TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            trace_id       TEXT NOT NULL DEFAULT '',
+            session_id     TEXT NOT NULL DEFAULT '',
+            app_id         TEXT NOT NULL DEFAULT '',
+            route_profile  TEXT NOT NULL DEFAULT '',
+            node           TEXT NOT NULL DEFAULT '',
+            seq            INTEGER NOT NULL DEFAULT 0,
+            tool_name      TEXT NOT NULL DEFAULT '',
+            args_preview   TEXT NOT NULL DEFAULT '',
+            result_preview TEXT NOT NULL DEFAULT '',
+            duration_ms    INTEGER NOT NULL DEFAULT 0,
+            success        BOOLEAN NOT NULL DEFAULT true,
+            error          TEXT
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Join key: reconstruct one request's whole tool sequence.
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_hera_tool_calls_trace \
+         ON hera_tool_calls(trace_id, seq)",
+    )
+    .execute(pool)
+    .await?;
+
+    // Per-tool aggregates (counts / p95 latency / error rate) + recency.
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_hera_tool_calls_name_ts \
+         ON hera_tool_calls(tool_name, ts DESC)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_hera_tool_calls_ts \
+         ON hera_tool_calls(ts DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    // Give the durable billing sink the same join key + node dimension.
+    ensure_pg_column(pool, "hera_usage_events", "trace_id", "TEXT NOT NULL DEFAULT ''").await?;
+    ensure_pg_column(pool, "hera_usage_events", "node", "TEXT NOT NULL DEFAULT ''").await?;
 
     Ok(())
 }

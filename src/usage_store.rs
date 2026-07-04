@@ -62,13 +62,24 @@ pub async fn hera_log_usage(pool: &sqlx::PgPool, payload: &Value) -> Value {
         .get("latency_ms")
         .and_then(|v| v.as_i64())
         .map(|v| v as i32);
+    let trace_id = payload
+        .get("trace_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let node = payload
+        .get("node")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     let result = sqlx::query(
         r#"
         INSERT INTO hera_usage_events
             (app_id, user_id, session_id, route_profile, model,
-             prompt_tokens, completion_tokens, total_tokens, is_cloud, latency_ms)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             prompt_tokens, completion_tokens, total_tokens, is_cloud, latency_ms,
+             trace_id, node)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         "#,
     )
     .bind(&app_id)
@@ -81,11 +92,79 @@ pub async fn hera_log_usage(pool: &sqlx::PgPool, payload: &Value) -> Value {
     .bind(total_tokens)
     .bind(is_cloud)
     .bind(latency_ms)
+    .bind(&trace_id)
+    .bind(&node)
     .execute(pool)
     .await;
 
     if let Err(e) = result {
         warn!(error = %e, app_id = %app_id, "hera_log_usage: INSERT failed (best-effort, ignored)");
+    }
+
+    json!({ "ok": true })
+}
+
+/// INSERT one per-tool-call telemetry row. Best-effort: SQL errors are logged
+/// but never propagated (mirrors `hera_log_usage`).
+/// payload fields (all optional):
+///   trace_id, session_id, app_id, route_profile, node, seq, tool_name,
+///   args_preview, result_preview, duration_ms, success, error
+pub async fn hera_log_tool_call(pool: &sqlx::PgPool, payload: &Value) -> Value {
+    let s = |key: &str| -> String {
+        payload
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let trace_id = s("trace_id");
+    let session_id = s("session_id");
+    let app_id = s("app_id");
+    let route_profile = s("route_profile");
+    let node = s("node");
+    let tool_name = s("tool_name");
+    let args_preview = s("args_preview");
+    let result_preview = s("result_preview");
+    let seq = payload.get("seq").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let duration_ms = payload
+        .get("duration_ms")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0) as i32;
+    let success = payload
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let error: Option<String> = payload
+        .get("error")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let result = sqlx::query(
+        r#"
+        INSERT INTO hera_tool_calls
+            (trace_id, session_id, app_id, route_profile, node, seq,
+             tool_name, args_preview, result_preview, duration_ms, success, error)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        "#,
+    )
+    .bind(&trace_id)
+    .bind(&session_id)
+    .bind(&app_id)
+    .bind(&route_profile)
+    .bind(&node)
+    .bind(seq)
+    .bind(&tool_name)
+    .bind(&args_preview)
+    .bind(&result_preview)
+    .bind(duration_ms)
+    .bind(success)
+    .bind(&error)
+    .execute(pool)
+    .await;
+
+    if let Err(e) = result {
+        warn!(error = %e, tool_name = %tool_name, "hera_log_tool_call: INSERT failed (best-effort, ignored)");
     }
 
     json!({ "ok": true })

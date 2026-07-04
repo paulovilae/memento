@@ -408,6 +408,7 @@ async fn process_uds_stream(
 
             // ─── Hera Usage Kit ───────────────────────────────────────
             "hera_log_usage" => usage_store::hera_log_usage(&pool, &req.payload).await,
+            "hera_log_tool_call" => usage_store::hera_log_tool_call(&pool, &req.payload).await,
             "hera_check_limit" => usage_store::hera_check_limit(&pool, &req.payload).await,
             "hera_usage_stats" => usage_store::hera_usage_stats(&pool, &req.payload).await,
 
