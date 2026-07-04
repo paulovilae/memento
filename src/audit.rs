@@ -29,15 +29,17 @@ pub async fn audit_log(pool: &sqlx::PgPool, payload: Value) -> Value {
         return serde_json::json!({ "error": "Missing required fields: actor, expert_identity, mutation_description" });
     }
 
-    if let Err(error) = verify_trace_signature(&payload) {
-        return serde_json::json!({ "error": error });
-    }
+    // `signature_verified` must reflect an ACTUAL cryptographic verification —
+    // not the mere presence of a `trace_signature` field (the old is_some()
+    // check flagged rows as verified even when no signing key was configured, so
+    // nothing was ever checked). verify_trace_signature returns Ok(true) only
+    // when a signature was validated against a configured key.
+    let signature_verified = match verify_trace_signature(&payload) {
+        Ok(verified) => verified,
+        Err(error) => return serde_json::json!({ "error": error }),
+    };
 
     let payload_json = payload.clone();
-    let signature_verified = payload
-        .get("trace_signature")
-        .and_then(|value| value.as_str())
-        .is_some();
     let retention_until = retention_deadline();
 
     let mut tx = match pool.begin().await {
@@ -101,9 +103,13 @@ pub async fn purge_expired_audit_entries(pool: &sqlx::PgPool) -> Result<u64, sql
     Ok(result.rows_affected())
 }
 
-fn verify_trace_signature(payload: &Value) -> Result<(), String> {
+/// Returns `Ok(true)` when a `trace_signature` was actually validated against a
+/// configured signing key, `Ok(false)` when there is nothing to verify (no
+/// `trace_payload`, or no key configured for the actor), and `Err` when a
+/// signature was required but is missing/malformed/wrong.
+fn verify_trace_signature(payload: &Value) -> Result<bool, String> {
     let Some(trace_payload) = payload.get("trace_payload") else {
-        return Ok(());
+        return Ok(false);
     };
 
     let target_app = payload
@@ -114,7 +120,7 @@ fn verify_trace_signature(payload: &Value) -> Result<(), String> {
         .to_lowercase();
 
     let Some(key) = signature_key_for(&target_app) else {
-        return Ok(());
+        return Ok(false);
     };
 
     let Some(signature) = payload
@@ -149,7 +155,7 @@ fn verify_trace_signature(payload: &Value) -> Result<(), String> {
     let expected = hex::encode(mac.finalize().into_bytes());
 
     if expected == signature {
-        Ok(())
+        Ok(true)
     } else {
         Err("trace signature verification failed".into())
     }
@@ -197,16 +203,51 @@ fn compute_audit_entry_hash(previous_hash: Option<&str>, payload: &Value) -> Str
 mod tests {
     use super::*;
 
+    // Both cases share the `MEMENTO_AUDIT_SIGNATURE_KEYS` env var, so they live
+    // in one test to avoid a parallel-execution race on the global.
     #[test]
-    fn verification_is_optional_without_configured_key() {
+    fn signature_verified_reflects_actual_verification() {
+        // 1. No key configured → nothing is verified, but it is not an error.
         std::env::remove_var("MEMENTO_AUDIT_SIGNATURE_KEYS");
-        let payload = serde_json::json!({
+        let unsigned = serde_json::json!({
             "actor": "sentinel",
             "trace_payload": {"host": "imaginos.ai"},
             "trace_signature": "ignored",
             "trace_signed_at": "2026-01-01T00:00:00Z",
             "trace_signature_alg": "hmac-sha256"
         });
-        assert!(verify_trace_signature(&payload).is_ok());
+        assert_eq!(verify_trace_signature(&unsigned), Ok(false));
+
+        // 2. Key configured + matching signature → genuinely verified.
+        let key = "test-secret-key";
+        let trace_payload = serde_json::json!({"host": "imaginos.ai"});
+        let signed_at = "2026-01-01T00:00:00Z";
+        let serialized = serde_json::to_string(&trace_payload).unwrap();
+        let signing_input = format!("{}\n{}", signed_at, serialized);
+        let mut mac = HmacSha256::new_from_slice(key.as_bytes()).unwrap();
+        mac.update(signing_input.as_bytes());
+        let signature = hex::encode(mac.finalize().into_bytes());
+
+        std::env::set_var("MEMENTO_AUDIT_SIGNATURE_KEYS", format!("sentinel={}", key));
+        let signed = serde_json::json!({
+            "actor": "sentinel",
+            "trace_payload": trace_payload,
+            "trace_signature": signature,
+            "trace_signed_at": signed_at,
+            "trace_signature_alg": "hmac-sha256"
+        });
+        let ok = verify_trace_signature(&signed);
+        // 3. Key configured + wrong signature → error (blocks the insert).
+        let tampered = serde_json::json!({
+            "actor": "sentinel",
+            "trace_payload": {"host": "evil.example"},
+            "trace_signature": signature,
+            "trace_signed_at": signed_at,
+            "trace_signature_alg": "hmac-sha256"
+        });
+        let bad = verify_trace_signature(&tampered);
+        std::env::remove_var("MEMENTO_AUDIT_SIGNATURE_KEYS");
+        assert_eq!(ok, Ok(true));
+        assert!(bad.is_err());
     }
 }

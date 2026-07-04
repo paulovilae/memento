@@ -271,7 +271,10 @@ impl SecurityConfig {
             | "hera_log_tool_call"
             | "hera_check_limit"
             | "save_memory" => Ok(()),
-            "hera_usage_stats" => {
+            "hera_usage_stats"
+            | "hera_tool_calls_recent"
+            | "hera_trace_timeline"
+            | "hera_trace_list" => {
                 self.authenticate_client(client, &self.privileged_clients, action)?;
                 Ok(())
             }

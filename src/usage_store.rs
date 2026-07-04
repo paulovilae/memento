@@ -341,3 +341,231 @@ pub async fn hera_usage_stats(pool: &sqlx::PgPool, payload: &Value) -> Value {
 
     json!({ "rows": data })
 }
+
+/// Map a `hera_tool_calls` row to the JSON shape used by all three endpoints
+/// below — avoids tripling the same field-by-field mapping.
+fn tool_call_row_to_json(row: &sqlx::postgres::PgRow) -> Value {
+    let ts = row
+        .try_get::<chrono::NaiveDateTime, _>("ts")
+        .map(|d| d.to_string())
+        .unwrap_or_default();
+    json!({
+        "id":             row.try_get::<i64, _>("id").unwrap_or(0),
+        "ts":             ts,
+        "trace_id":       row.try_get::<String, _>("trace_id").unwrap_or_default(),
+        "session_id":     row.try_get::<String, _>("session_id").unwrap_or_default(),
+        "app_id":         row.try_get::<String, _>("app_id").unwrap_or_default(),
+        "route_profile":  row.try_get::<String, _>("route_profile").unwrap_or_default(),
+        "node":           row.try_get::<String, _>("node").unwrap_or_default(),
+        "seq":            row.try_get::<i32, _>("seq").unwrap_or(0),
+        "tool_name":      row.try_get::<String, _>("tool_name").unwrap_or_default(),
+        "args_preview":   row.try_get::<String, _>("args_preview").unwrap_or_default(),
+        "result_preview": row.try_get::<String, _>("result_preview").unwrap_or_default(),
+        "duration_ms":    row.try_get::<i32, _>("duration_ms").unwrap_or(0),
+        "success":        row.try_get::<bool, _>("success").unwrap_or(true),
+        "error":          row.try_get::<Option<String>, _>("error").unwrap_or_default(),
+    })
+}
+
+/// Recent tool-call telemetry, filterable by tool_name/app_id/success/age.
+/// payload: { tool_name?, app_id?, success?, since_minutes?, limit?: 100 }
+pub async fn hera_tool_calls_recent(pool: &sqlx::PgPool, payload: &Value) -> Value {
+    let tool_name = payload
+        .get("tool_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let app_id = payload
+        .get("app_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let succ_filter: i32 = match payload.get("success").and_then(|v| v.as_bool()) {
+        Some(true) => 1,
+        Some(false) => 0,
+        None => -1,
+    };
+    let since_min = payload
+        .get("since_minutes")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0) as i32;
+    let limit = payload
+        .get("limit")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(100)
+        .clamp(1, 500) as i32;
+
+    let rows_result = sqlx::query(
+        r#"
+        SELECT id, ts, trace_id, session_id, app_id, route_profile, node, seq,
+               tool_name, args_preview, result_preview, duration_ms, success, error
+        FROM hera_tool_calls
+        WHERE ($1 = '' OR tool_name = $1)
+          AND ($2 = '' OR app_id = $2)
+          AND ($3 = -1 OR success = ($3 = 1))
+          AND ($4 = 0 OR ts >= now() - make_interval(mins => $4))
+        ORDER BY id DESC
+        LIMIT $5
+        "#,
+    )
+    .bind(&tool_name)
+    .bind(&app_id)
+    .bind(succ_filter)
+    .bind(since_min)
+    .bind(limit)
+    .fetch_all(pool)
+    .await;
+
+    let rows = match rows_result {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(error = %e, "hera_tool_calls_recent: query failed");
+            return json!({ "ok": false, "error": e.to_string() });
+        }
+    };
+
+    let data: Vec<Value> = rows.iter().map(tool_call_row_to_json).collect();
+    json!({ "ok": true, "rows": data })
+}
+
+/// Full timeline for one trace_id: tool calls (id ASC = authoritative order)
+/// plus any usage events sharing the same trace_id.
+/// payload: { trace_id } (required)
+pub async fn hera_trace_timeline(pool: &sqlx::PgPool, payload: &Value) -> Value {
+    let trace_id = payload
+        .get("trace_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if trace_id.is_empty() {
+        return json!({ "ok": false, "error": "trace_id required" });
+    }
+
+    let calls_result = sqlx::query(
+        r#"
+        SELECT id, ts, trace_id, session_id, app_id, route_profile, node, seq,
+               tool_name, args_preview, result_preview, duration_ms, success, error
+        FROM hera_tool_calls
+        WHERE trace_id = $1
+        ORDER BY id ASC
+        "#,
+    )
+    .bind(&trace_id)
+    .fetch_all(pool)
+    .await;
+
+    let calls = match calls_result {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(error = %e, "hera_trace_timeline: tool_calls query failed");
+            return json!({ "ok": false, "error": e.to_string() });
+        }
+    };
+    let calls_data: Vec<Value> = calls.iter().map(tool_call_row_to_json).collect();
+
+    let usage_result = sqlx::query(
+        r#"
+        SELECT ts, app_id, user_id, session_id, route_profile, model, prompt_tokens, completion_tokens, total_tokens, is_cloud, latency_ms, node
+        FROM hera_usage_events
+        WHERE trace_id = $1
+        ORDER BY ts ASC
+        "#,
+    )
+    .bind(&trace_id)
+    .fetch_all(pool)
+    .await;
+
+    let usage = match usage_result {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(error = %e, "hera_trace_timeline: usage_events query failed");
+            return json!({ "ok": false, "error": e.to_string() });
+        }
+    };
+    let usage_data: Vec<Value> = usage
+        .iter()
+        .map(|row| {
+            let ts = row
+                .try_get::<chrono::NaiveDateTime, _>("ts")
+                .map(|d| d.to_string())
+                .unwrap_or_default();
+            json!({
+                "ts":                ts,
+                "app_id":            row.try_get::<String, _>("app_id").unwrap_or_default(),
+                "user_id":           row.try_get::<String, _>("user_id").unwrap_or_default(),
+                "session_id":        row.try_get::<String, _>("session_id").unwrap_or_default(),
+                "route_profile":     row.try_get::<String, _>("route_profile").unwrap_or_default(),
+                "model":             row.try_get::<String, _>("model").unwrap_or_default(),
+                "prompt_tokens":     row.try_get::<i32, _>("prompt_tokens").unwrap_or(0),
+                "completion_tokens": row.try_get::<i32, _>("completion_tokens").unwrap_or(0),
+                "total_tokens":      row.try_get::<i32, _>("total_tokens").unwrap_or(0),
+                "is_cloud":          row.try_get::<bool, _>("is_cloud").unwrap_or(false),
+                "latency_ms":        row.try_get::<Option<i32>, _>("latency_ms").unwrap_or_default(),
+                "node":              row.try_get::<String, _>("node").unwrap_or_default(),
+            })
+        })
+        .collect();
+
+    json!({ "ok": true, "tool_calls": calls_data, "usage": usage_data })
+}
+
+/// List recent traces (grouped by trace_id) with summary stats.
+/// payload: { limit?: 50 }
+pub async fn hera_trace_list(pool: &sqlx::PgPool, payload: &Value) -> Value {
+    let limit = payload
+        .get("limit")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(50)
+        .clamp(1, 200) as i32;
+
+    let rows_result = sqlx::query(
+        r#"
+        SELECT trace_id,
+               min(ts) AS started, max(ts) AS ended,
+               count(*)::BIGINT AS calls,
+               bool_and(success) AS all_ok,
+               COALESCE(sum(duration_ms),0)::BIGINT AS total_ms
+        FROM hera_tool_calls
+        WHERE trace_id <> ''
+        GROUP BY trace_id
+        ORDER BY started DESC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await;
+
+    let rows = match rows_result {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(error = %e, "hera_trace_list: query failed");
+            return json!({ "ok": false, "error": e.to_string() });
+        }
+    };
+
+    let data: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            let started = row
+                .try_get::<chrono::NaiveDateTime, _>("started")
+                .map(|d| d.to_string())
+                .unwrap_or_default();
+            let ended = row
+                .try_get::<chrono::NaiveDateTime, _>("ended")
+                .map(|d| d.to_string())
+                .unwrap_or_default();
+            json!({
+                "trace_id":  row.try_get::<String, _>("trace_id").unwrap_or_default(),
+                "started":   started,
+                "ended":     ended,
+                "calls":     row.try_get::<i64, _>("calls").unwrap_or(0),
+                "all_ok":    row.try_get::<bool, _>("all_ok").unwrap_or(true),
+                "total_ms":  row.try_get::<i64, _>("total_ms").unwrap_or(0),
+            })
+        })
+        .collect();
+
+    json!({ "ok": true, "traces": data })
+}
