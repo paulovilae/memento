@@ -73,6 +73,26 @@ pub async fn hera_log_usage(pool: &sqlx::PgPool, payload: &Value) -> Value {
         .unwrap_or("")
         .to_string();
 
+    // Drop unattributed zero-token probe events. A background health/warmup
+    // probe hits Hera `generate` every ~22s with NO identity (empty app_id,
+    // route=default, user=anonymous) and — because the local llama.cpp engine
+    // does not surface usage stats — Path B logs it as 0/0/0. That flood was
+    // 4008 of 4017 rows in 24h (99.8%), inflating the billing/attribution
+    // denominator so /hera-stats + the Hera-usage % lie (they crushed
+    // claude_code's share from ~18% to ~12%).
+    //
+    // We can't key on 0-token alone: real local generations ALSO report 0
+    // tokens today (the engine bug above), so that would erase attributed work.
+    // Key on unattributed AND zero-token — an event with no app, no session and
+    // an anonymous user carrying no tokens is pure noise; anything with any
+    // identity still logs (attributes a request) even at 0 tokens.
+    let unattributed = app_id.is_empty()
+        && session_id.is_empty()
+        && (user_id.is_empty() || user_id == "anonymous");
+    if unattributed && prompt_tokens == 0 && completion_tokens == 0 && total_tokens == 0 {
+        return json!({ "ok": true, "skipped": "unattributed_zero_token" });
+    }
+
     let result = sqlx::query(
         r#"
         INSERT INTO hera_usage_events
