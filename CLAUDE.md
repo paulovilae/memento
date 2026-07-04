@@ -153,17 +153,24 @@ When adding a migration, also add `ensure_pg_index` / `ensure_pg_expression_inde
 
 ---
 
-## Run mode — Memento is `cargo run`, not a pre-deployed binary
+## Run mode — Memento runs a prebuilt release binary via start_release.sh
 
-This is unusual and tripped a session. Unlike Hera and OS-v3 (which ship a pre-deployed binary under `~/bin/`), Memento on the production nodes is run from source via `pm2`:
+Memento on the production nodes is launched by `pm2` through a wrapper:
 
 ```
 script args: -lc /home/paulo/Programs/apps/OS/scripts/pm2_env_wrapper.sh ./scripts/start_release.sh
 ```
 
-`pm2 restart memento-node` causes `cargo run` to recompile if the source changed (often 1–2 minutes), then takes over the socket. While compiling, the UDS socket is down — callers will get "Connection refused" until compile finishes.
+⚠️ **GOTCHA (verified 2026-07-04): `start_release.sh` runs the existing `./target/release/memento` binary and only rebuilds when that binary is missing/corrupt/wrong-arch.** A plain `pm2 restart memento-node` therefore **re-runs the stale binary** — it does NOT pick up source edits. (An earlier version of this doc claimed the restart does `cargo run` and recompiles on change; that is wrong for the release path and cost a session: a `security.rs` whitelist edit silently had no effect until the binary was rebuilt.)
 
-Implication: **deploying a Memento change is `pm2 restart`, not `scp` of a binary** — Syncthing already moved the source. Verify the restart settled by hitting `/tmp/memento.sock` with `get_metrics` (cheap action).
+**Deploying a Memento change is two steps:**
+
+```bash
+cd Memento && cargo build --release --bin memento   # 1. rebuild the binary (Syncthing already moved the source to the node)
+pm2 restart memento-node                             # 2. restart to load it
+```
+
+While the binary rebuilds/restarts the UDS socket is down — callers get "Connection refused" until it settles. Verify by hitting `/tmp/memento.sock` with `get_metrics` (cheap action). Do the `cargo build` on the node that runs the process (genesis), not the laptop — the binary is not Syncthing-replicated, only the source is.
 
 ---
 
