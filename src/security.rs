@@ -268,6 +268,7 @@ impl SecurityConfig {
             // Hera usage kit: log + check are best-effort per-request (open to any
             // authenticated Hera caller); stats is gated to privileged clients below.
             | "hera_log_usage"
+            | "hera_log_tool_call"
             | "hera_check_limit"
             | "save_memory" => Ok(()),
             "hera_usage_stats" => {
