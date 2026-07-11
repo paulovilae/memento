@@ -1,6 +1,7 @@
 use hmac::{Hmac, Mac};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use sqlx::Row;
 use std::collections::HashMap;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -92,6 +93,85 @@ pub async fn audit_log(pool: &sqlx::PgPool, payload: Value) -> Value {
         },
         Err(e) => serde_json::json!({ "error": format!("DB error: {}", e) }),
     }
+}
+
+// ─── query ────────────────────────────────────────────────────────────────
+//
+// Read path for audit_log — used by incident diagnosis (e.g. "what did actor
+// X touch on target_app Y since Z"). Deliberately excludes payload_json and
+// the hash-chain columns (prev_entry_hash/entry_hash/signature_verified):
+// those are internal to the tamper-evidence mechanism, not needed for a
+// diagnosis read, and payload_json can carry arbitrary caller-supplied data.
+//
+// Payload (all optional): target_app: String, since: String (ISO8601,
+// filters timestamp >= since), sensitive_action: bool (the column is TEXT —
+// a free-form label set by callers like Sentinel's "system_event" — so the
+// bool here means "was a label present at all": true = only rows where
+// sensitive_action IS NOT NULL, false = only rows where it IS NULL), and
+// limit: i64 (default 50, clamped to 500).
+pub async fn query(pool: &sqlx::PgPool, payload: Value) -> Value {
+    let target_app = payload
+        .get("target_app")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let since = payload
+        .get("since")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let sensitive_action = payload.get("sensitive_action").and_then(|v| v.as_bool());
+    let limit = payload
+        .get("limit")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(50)
+        .clamp(1, 500);
+
+    let rows = match sqlx::query(
+        "SELECT id, actor, expert_identity, capability_used, sensitive_action, target_app, \
+         target_page, mutation_description, tenant_id, session_id, timestamp \
+         FROM audit_log \
+         WHERE ($1::text IS NULL OR target_app = $1) \
+           AND ($2::text IS NULL OR timestamp >= $2::timestamp) \
+           AND ($3::bool IS NULL OR (sensitive_action IS NOT NULL) = $3) \
+         ORDER BY id DESC LIMIT $4",
+    )
+    .bind(&target_app)
+    .bind(&since)
+    .bind(sensitive_action)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            return serde_json::json!({ "status": "error", "message": format!("DB error: {}", error) });
+        }
+    };
+
+    let entries: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.get::<i32, _>("id"),
+                "actor": r.get::<String, _>("actor"),
+                "expert_identity": r.get::<String, _>("expert_identity"),
+                "capability_used": r.get::<String, _>("capability_used"),
+                "sensitive_action": r.get::<Option<String>, _>("sensitive_action"),
+                "target_app": r.get::<Option<String>, _>("target_app"),
+                "target_page": r.get::<Option<String>, _>("target_page"),
+                "mutation_description": r.get::<String, _>("mutation_description"),
+                "tenant_id": r.get::<Option<String>, _>("tenant_id"),
+                "session_id": r.get::<Option<String>, _>("session_id"),
+                "timestamp": ts_str(r.get::<Option<chrono::NaiveDateTime>, _>("timestamp")),
+            })
+        })
+        .collect();
+    let count = entries.len();
+
+    serde_json::json!({ "status": "success", "data": { "entries": entries, "count": count } })
+}
+
+fn ts_str(dt: Option<chrono::NaiveDateTime>) -> Option<String> {
+    dt.map(|t| t.format("%Y-%m-%dT%H:%M:%S").to_string())
 }
 
 pub async fn purge_expired_audit_entries(pool: &sqlx::PgPool) -> Result<u64, sqlx::Error> {

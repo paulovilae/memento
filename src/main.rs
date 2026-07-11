@@ -367,6 +367,7 @@ async fn process_uds_stream(
 
             // ─── Virtual Office: Audit Log ─────────────────────────────
             "audit_log" => audit::audit_log(&pool, req.payload).await,
+            "audit_log_query" => audit::query(&pool, req.payload).await,
             "get_metrics" => metrics::get_metrics(),
             "get_runtime_preflight" => {
                 runtime_memory::get_runtime_preflight(&pool, req.payload).await

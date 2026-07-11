@@ -188,7 +188,7 @@ impl SecurityConfig {
                 self.authenticate_client(client, &self.bio_clients, action)?;
                 Ok(())
             }
-            "audit_log" => {
+            "audit_log" | "audit_log_query" => {
                 self.authenticate_client(client, &self.audit_clients, action)?;
                 Ok(())
             }
