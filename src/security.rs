@@ -64,10 +64,22 @@ fn parse_tokens_env(var: &str) -> HashMap<String, String> {
 }
 
 fn parse_socket_mode() -> u32 {
-    std::env::var("MEMENTO_SOCKET_MODE")
+    const DEFAULT_MODE: u32 = 0o600;
+    let requested = std::env::var("MEMENTO_SOCKET_MODE")
         .ok()
-        .and_then(|value| u32::from_str_radix(value.trim_start_matches("0o"), 8).ok())
-        .unwrap_or(0o600)
+        .and_then(|value| u32::from_str_radix(value.trim_start_matches("0o"), 8).ok());
+
+    match requested {
+        Some(mode) if mode & 0o007 != 0 => {
+            eprintln!(
+                "SECURITY WARNING: MEMENTO_SOCKET_MODE={:o} grants 'other' access to the UDS socket; refusing and falling back to {:o}. Set a mode without world bits (e.g. 0600 or 0660) if you need this.",
+                mode, DEFAULT_MODE
+            );
+            DEFAULT_MODE
+        }
+        Some(mode) => mode,
+        None => DEFAULT_MODE,
+    }
 }
 
 impl SecurityConfig {
