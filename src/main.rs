@@ -405,6 +405,7 @@ async fn process_uds_stream(
             "kg_centrality" => kg_store::centrality(&pool, req.payload).await,
             "kg_path" => kg_store::path(&pool, req.payload).await,
             "kg_communities" => kg_store::communities(&pool, req.payload).await,
+            "kg_semantic_search" => kg_store::semantic_search(&pool, req.payload).await,
 
             // ─── Hera Usage Kit ───────────────────────────────────────
             "hera_log_usage" => usage_store::hera_log_usage(&pool, &req.payload).await,

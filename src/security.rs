@@ -265,6 +265,7 @@ impl SecurityConfig {
             | "kg_centrality"
             | "kg_path"
             | "kg_communities"
+            | "kg_semantic_search"
             // Hera usage kit: log + check are best-effort per-request (open to any
             // authenticated Hera caller); stats is gated to privileged clients below.
             | "hera_log_usage"

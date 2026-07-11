@@ -11,9 +11,10 @@
 //! happen in Rust on the consumer side.
 //!
 //! Live actions (registered in `main.rs`):
-//!   - `kg_upsert_triples` — merge entities + relations into the graph
-//!   - `kg_graph`          — full scoped subgraph (entities + edges) for the viewer
-//!   - `kg_neighbors`      — k-hop expansion from seed entities (retrieval)
+//!   - `kg_upsert_triples`    — merge entities + relations into the graph
+//!   - `kg_graph`             — full scoped subgraph (entities + edges) for the viewer
+//!   - `kg_neighbors`         — k-hop expansion from seed entities (retrieval)
+//!   - `kg_semantic_search`   — cosine-rerank entities against a caller-supplied query embedding
 
 use serde_json::{json, Value};
 use sqlx::Row;
@@ -33,6 +34,23 @@ fn unpack_embedding(bytes: &[u8]) -> Option<Vec<f32>> {
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect(),
     )
+}
+
+/// Cosine similarity between two f32 vectors. Duplicated locally rather than
+/// reused from `scoped_memory::embedding` (which is `pub(super)`, private to
+/// that module) — same duplication convention already used for
+/// pack_embedding/unpack_embedding between the two modules.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a <= 0.0 || norm_b <= 0.0 {
+        return 0.0;
+    }
+    dot / (norm_a * norm_b)
 }
 
 /// Deterministic 64-bit FNV-1a — stable across processes (unlike DefaultHasher),
@@ -533,6 +551,89 @@ pub async fn neighbors(pool: &sqlx::PgPool, payload: Value) -> Value {
     json!({ "ok": true, "entities": entities, "relations": relations, "entity_count": ec, "relation_count": rc })
 }
 
+// ─── kg_semantic_search ─────────────────────────────────────────────────────
+//
+// Cosine-rerank entities against a caller-supplied query embedding — "which
+// entities are semantically closest to this query?" Mirrors
+// `scoped_memory::semantic_recall`'s pattern: Memento never computes
+// embeddings itself, the caller (Hera candle BERT MiniLM-L12, 384-dim) embeds
+// the query and passes the vector. Payload: query_embedding: [f32] (required)
+// + scope (app_id/tenant_id/expert_id/collection, all optional) + top?
+// (default 10, clamp 1..50).
+pub async fn semantic_search(pool: &sqlx::PgPool, payload: Value) -> Value {
+    let query_embedding: Vec<f32> = match payload.get("query_embedding").and_then(|v| v.as_array())
+    {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_f64().map(|f| f as f32))
+            .collect(),
+        None => return json!({ "status": "error", "message": "query_embedding requerido" }),
+    };
+    if query_embedding.is_empty() {
+        return json!({ "status": "error", "message": "query_embedding requerido" });
+    }
+
+    let app = opt_str(&payload, "app_id");
+    let tenant = opt_str(&payload, "tenant_id");
+    let expert = opt_str(&payload, "expert_id");
+    let coll = opt_str(&payload, "collection");
+    let top = payload.get("top").and_then(|v| v.as_i64()).unwrap_or(10).clamp(1, 50) as usize;
+
+    // Hard cap on candidates pulled before reranking in Rust: with no scope filter
+    // the repo-wide code graph alone runs ~94k entities, so we bound the scan to a
+    // recent/most-mentioned slice rather than reading the whole table every call.
+    const CANDIDATE_CAP: i64 = 3000;
+
+    let rows = match sqlx::query(
+        "SELECT entity_id, name, entity_type, summary, embedding_b \
+         FROM kg_entity \
+         WHERE embedding_b IS NOT NULL \
+           AND ($1::text IS NULL OR app_id    = $1) \
+           AND ($2::text IS NULL OR tenant_id = $2) \
+           AND ($3::text IS NULL OR expert_id = $3) \
+           AND ($4::text IS NULL OR collection = $4) \
+         ORDER BY mention_count DESC LIMIT $5",
+    )
+    .bind(&app)
+    .bind(&tenant)
+    .bind(&expert)
+    .bind(&coll)
+    .bind(CANDIDATE_CAP)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!(?e, "kg_semantic_search: query failed");
+            return json!({ "status": "error", "message": format!("DB error: {}", e) });
+        }
+    };
+
+    let mut scored: Vec<(f32, Value)> = rows
+        .iter()
+        .filter_map(|r| {
+            let emb_bytes: Option<Vec<u8>> = r.get::<Option<Vec<u8>>, _>("embedding_b");
+            let emb = unpack_embedding(emb_bytes.as_deref()?)?;
+            let score = cosine_similarity(&query_embedding, &emb);
+            Some((
+                score,
+                json!({
+                    "entity_id":   r.get::<String, _>("entity_id"),
+                    "name":        r.get::<String, _>("name"),
+                    "entity_type": r.get::<String, _>("entity_type"),
+                    "summary":     r.get::<Option<String>, _>("summary"),
+                    "score":       score,
+                }),
+            ))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let results: Vec<Value> = scored.into_iter().take(top).map(|(_, v)| v).collect();
+    let count = results.len();
+
+    json!({ "status": "success", "data": { "results": results, "count": count } })
+}
+
 // ─── kg_centrality ────────────────────────────────────────────────────────────
 //
 // PageRank over the scoped graph — "which entities matter most" — computed in Rust
@@ -875,5 +976,16 @@ mod tests {
         let v = vec![0.5f32, -1.0, 2.5];
         assert_eq!(unpack_embedding(&pack_embedding(&v)), Some(v));
         assert_eq!(unpack_embedding(&[1, 2, 3]), None);
+    }
+
+    #[test]
+    fn cosine_similarity_identical_and_orthogonal() {
+        let a = vec![1.0f32, 0.0, 0.0];
+        let b = vec![1.0f32, 0.0, 0.0];
+        let c = vec![0.0f32, 1.0, 0.0];
+        assert!((cosine_similarity(&a, &b) - 1.0).abs() < 1e-6);
+        assert!(cosine_similarity(&a, &c).abs() < 1e-6);
+        assert_eq!(cosine_similarity(&a, &[]), 0.0);
+        assert_eq!(cosine_similarity(&[], &[]), 0.0);
     }
 }

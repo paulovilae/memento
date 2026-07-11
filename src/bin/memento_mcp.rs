@@ -161,6 +161,21 @@ struct KgCommunitiesParams {
     min_size: Option<i64>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct KgSemanticSearchParams {
+    #[schemars(description = "Query vector already computed by the caller (384-dim, model paraphrase-multilingual-MiniLM-L12-v2) — this tool does NOT calculate embeddings itself, the caller must generate it first (e.g. Hera embed_text_local or the 'embed' IPC action) and pass the resulting float array here.")]
+    query_embedding: Vec<f32>,
+    #[schemars(description = "Crate/app slug to scope the query — omit for the whole graph")]
+    #[serde(default)]
+    app_id: Option<String>,
+    #[schemars(description = "Collection namespace — use 'code_graph' for codebase graphs")]
+    #[serde(default)]
+    collection: Option<String>,
+    #[schemars(description = "Max results to return (default 10, max 50)")]
+    #[serde(default)]
+    top: Option<usize>,
+}
+
 // ─── IPC Client Helper ──────────────────────────────────────────────────
 
 /// Sends a JSON action to the Memento daemon over UDS and returns the response.
@@ -348,6 +363,26 @@ impl MementoMcp {
                 "app_id": params.app_id,
                 "collection": params.collection,
                 "min_size": params.min_size,
+            }),
+        )
+        .await
+    }
+
+    /// Cosine-rerank entities against a caller-supplied query embedding.
+    #[tool(
+        description = "Semantic search over the knowledge graph: cosine-ranks entities against a query embedding YOU already computed (this tool never calls an embedding model itself). Use this when you have a natural-language question and its embedding vector and want the closest-matching entities by meaning, not just by name/keyword like kg_graph. Scope with collection='code_graph' and app_id=<crate-slug> for codebase search."
+    )]
+    async fn kg_semantic_search(
+        &self,
+        Parameters(params): Parameters<KgSemanticSearchParams>,
+    ) -> String {
+        send_ipc(
+            "kg_semantic_search",
+            serde_json::json!({
+                "query_embedding": params.query_embedding,
+                "app_id": params.app_id,
+                "collection": params.collection,
+                "top": params.top,
             }),
         )
         .await
