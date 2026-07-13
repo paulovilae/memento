@@ -713,10 +713,13 @@ pub async fn centrality(pool: &sqlx::PgPool, payload: Value) -> Value {
         pr = next;
     }
 
+    let names: Vec<String> = ents.iter().map(|r| r.get::<String, _>("name")).collect();
+
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| pr[b].partial_cmp(&pr[a]).unwrap_or(std::cmp::Ordering::Equal));
     let top_list: Vec<Value> = order
         .into_iter()
+        .filter(|&i| !is_boilerplate_entity_name(&names[i]))
         .take(top)
         .map(|i| {
             let r = &ents[i];
@@ -730,6 +733,34 @@ pub async fn centrality(pool: &sqlx::PgPool, payload: Value) -> Value {
         })
         .collect();
     json!({ "ok": true, "count": n, "top": top_list })
+}
+
+// High-degree helper functions (i18n getters, generic accessors) legitimately accumulate
+// huge mention_count across every template that calls them, drowning out the structural
+// "god nodes" (controllers, core types) that kg_centrality exists to surface. Filtered by
+// local name (last `::` segment) so a real function named e.g. `Config::default` elsewhere
+// isn't confused with an app's own meaningful `default` — this only strips the common
+// boilerplate identifiers themselves, not everything that calls them.
+fn is_boilerplate_entity_name(name: &str) -> bool {
+    let local = name.rsplit("::").next().unwrap_or(name);
+    matches!(
+        local,
+        "t" | "get"
+            | "ok"
+            | "lang_of"
+            | "new"
+            | "default"
+            | "fmt"
+            | "from"
+            | "into"
+            | "clone"
+            | "to_string"
+            | "as_str"
+            | "as_ref"
+            | "eq"
+            | "hash"
+            | "cmp"
+    )
 }
 
 // Load the scoped graph as (entities: id→(name, mention), undirected adjacency).
