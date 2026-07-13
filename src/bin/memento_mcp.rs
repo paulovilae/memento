@@ -78,6 +78,66 @@ struct DeleteMemoryParams {
     key: String,
 }
 
+// ─── Scoped Memory (Recursive State Node) Parameter Schemas ────────────
+//
+// store_memory/retrieve_memory/list_all_memories/search_memories above talk
+// to `knowledge_store` (a separate, older key/value table). The tools that
+// actually save_memory writes to (`scoped_memory` — the recursive state
+// node) had NO read-side MCP tool before this, even though the IPC actions
+// (query_memory_records / recall_recursive_context) were always live. These
+// two close that gap.
+//
+// NOTE on app_id: this bridge's IPC client identity is hardcoded to
+// app="memento-mcp" (see request_envelope). security.rs::require_payload_app_match
+// rejects a payload `app_id` that doesn't match the caller's own app unless the
+// caller is privileged (hera/os-v3) — so filtering by `app_id` will usually be
+// refused for this bridge. Filter by expert_id/user_id/session_id/scope/
+// memory_type/wing/hall/room instead — those aren't app_id-gated.
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RecallScopedMemoryParams {
+    #[schemars(description = "Filter by expert_id (e.g. 'ava'). Prefer this over app_id — app_id is usually rejected for this bridge, see tool description.")]
+    #[serde(default)]
+    expert_id: Option<String>,
+    #[schemars(description = "Filter by user_id")]
+    #[serde(default)]
+    user_id: Option<String>,
+    #[schemars(description = "Filter by app_id — WARNING: usually rejected by ACL for this bridge unless it equals 'memento-mcp'. Use expert_id/scope/memory_type instead.")]
+    #[serde(default)]
+    app_id: Option<String>,
+    #[schemars(description = "Filter by session_id")]
+    #[serde(default)]
+    session_id: Option<String>,
+    #[schemars(description = "Filter by scope, e.g. 'personal', 'app', 'durable'")]
+    #[serde(default)]
+    scope: Option<String>,
+    #[schemars(description = "Filter by memory_type, e.g. 'note', 'decision', 'preference', 'task'")]
+    #[serde(default)]
+    memory_type: Option<String>,
+    #[schemars(description = "Max rows to return (default 50)")]
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RecallRecursiveContextParams {
+    #[schemars(description = "Filter by expert_id (e.g. 'ava'). Prefer this over app_id — see recall_scoped_memory note.")]
+    #[serde(default)]
+    expert_id: Option<String>,
+    #[schemars(description = "Filter by user_id")]
+    #[serde(default)]
+    user_id: Option<String>,
+    #[schemars(description = "Filter by app_id — usually rejected by ACL for this bridge, see recall_scoped_memory note")]
+    #[serde(default)]
+    app_id: Option<String>,
+    #[schemars(description = "Filter by session_id")]
+    #[serde(default)]
+    session_id: Option<String>,
+    #[schemars(description = "Filter by scope, e.g. 'personal', 'app', 'durable'")]
+    #[serde(default)]
+    scope: Option<String>,
+}
+
 // ─── Knowledge Graph (kg_*) Parameter Schemas ───────────────────────────
 //
 // Read-only wrappers over Memento's sovereign knowledge graph (kg_entity/
@@ -281,6 +341,53 @@ impl MementoMcp {
         send_ipc("delete_knowledge", serde_json::json!({ "key": params.key })).await
     }
 
+    /// Read back scoped_memory (the Recursive State Node) — what save_memory
+    /// actually writes to. Distinct from list_all_memories/search_memories,
+    /// which only see the older knowledge_store table.
+    #[tool(
+        description = "Read entries from scoped_memory (the Recursive State Node) — this is where the save_memory tool (used by Hera, Ava, and agent dual-writes) actually stores content. list_all_memories/search_memories do NOT see this table. Requires at least one filter: expert_id, user_id, session_id, scope, or memory_type. Prefer expert_id/scope/memory_type over app_id (app_id is usually rejected by ACL for this bridge)."
+    )]
+    async fn recall_scoped_memory(
+        &self,
+        Parameters(params): Parameters<RecallScopedMemoryParams>,
+    ) -> String {
+        send_ipc(
+            "query_memory_records",
+            serde_json::json!({
+                "expert_id": params.expert_id,
+                "user_id": params.user_id,
+                "app_id": params.app_id,
+                "session_id": params.session_id,
+                "scope": params.scope,
+                "memory_type": params.memory_type,
+                "limit": params.limit,
+            }),
+        )
+        .await
+    }
+
+    /// Full recursive recall: project/room/session summaries + working
+    /// context + durable facts + recent events, in one call.
+    #[tool(
+        description = "Fetch the full recursive memory context for a scope: project/room/session summaries, working context, durable facts, and recent events, in one call. This is the Recursive State Node's flagship read — richer than recall_scoped_memory's flat row list. Requires at least one filter: expert_id, user_id, session_id, or scope. Prefer expert_id/scope over app_id (app_id is usually rejected by ACL for this bridge)."
+    )]
+    async fn recall_recursive_context(
+        &self,
+        Parameters(params): Parameters<RecallRecursiveContextParams>,
+    ) -> String {
+        send_ipc(
+            "recall_recursive_context",
+            serde_json::json!({
+                "expert_id": params.expert_id,
+                "user_id": params.user_id,
+                "app_id": params.app_id,
+                "session_id": params.session_id,
+                "scope": params.scope,
+            }),
+        )
+        .await
+    }
+
     /// Fetch the scoped knowledge graph (entities + relations). For codebases,
     /// use this BEFORE grepping the filesystem to see what's already known:
     /// which files/functions/modules exist and how they connect.
@@ -398,6 +505,14 @@ impl ServerHandler for MementoMcp {
                  1) Call list_all_memories() to get the complete key directory. \
                  2) Call retrieve_memory(exact_key) to fetch specific content. \
                  Only use search_memories() for content-based searches. \
+                 store_memory/retrieve_memory/list_all_memories/search_memories only see \
+                 the older knowledge_store table. The save_memory tool (used by Hera/Ava/agent \
+                 dual-writes) writes to a DIFFERENT table, scoped_memory (the Recursive State \
+                 Node) — read it back with recall_scoped_memory (flat filtered rows) or \
+                 recall_recursive_context (project/room/session summaries + working context + \
+                 durable facts + recent events in one call). Both need at least one filter — \
+                 prefer expert_id/scope/memory_type over app_id, which is usually ACL-rejected \
+                 for this bridge. \
                  \
                  Memento also holds a knowledge graph of this codebase (collection='code_graph', \
                  app_id=<crate-slug>), pre-computed from AST + doc analysis across the monorepo. \
