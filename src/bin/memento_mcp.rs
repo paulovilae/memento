@@ -136,6 +136,15 @@ struct RecallRecursiveContextParams {
     #[schemars(description = "Filter by scope, e.g. 'personal', 'app', 'durable'")]
     #[serde(default)]
     scope: Option<String>,
+    #[schemars(description = "Max durable facts to return (default 16). Use 5 for compact inline context.")]
+    #[serde(default)]
+    max_durable_facts: Option<i64>,
+    #[schemars(description = "Max recent events to return (default 12). Use 5 for compact inline context.")]
+    #[serde(default)]
+    max_recent_events: Option<i64>,
+    #[schemars(description = "Skip working_context section (saves ~40% tokens — it duplicates top-level durable_facts + recent_events). Defaults to false.")]
+    #[serde(default)]
+    skip_working_context: Option<bool>,
 }
 
 // ─── Knowledge Graph (kg_*) Parameter Schemas ───────────────────────────
@@ -162,7 +171,9 @@ struct KgGraphParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct KgNeighborsParams {
-    #[schemars(description = "Seed entity_ids to expand from (e.g. a function or file node id)")]
+    #[schemars(
+        description = "REQUIRED, non-empty. Seed entity_ids to expand from — obtain these FIRST from a kg_centrality or kg_graph call (the `entity_id` field, e.g. \"e_34e06cda19fd9c01\"), never invent them. Omitting this errors with 'missing field seeds'."
+    )]
     seeds: Vec<String>,
     #[schemars(description = "Crate/app slug to scope the query")]
     #[serde(default)]
@@ -383,6 +394,9 @@ impl MementoMcp {
                 "app_id": params.app_id,
                 "session_id": params.session_id,
                 "scope": params.scope,
+                "max_durable_facts": params.max_durable_facts,
+                "max_recent_events": params.max_recent_events,
+                "skip_working_context": params.skip_working_context,
             }),
         )
         .await

@@ -760,6 +760,20 @@ fn is_boilerplate_entity_name(name: &str) -> bool {
             | "eq"
             | "hash"
             | "cmp"
+            // Generic error/container/iterator verbs: high-degree by construction
+            // (called from nearly every module) but never a structural "god node".
+            // Observed leaking past the filter on hera-core (build_feedback::err,
+            // inflight::insert ranked above real controllers).
+            | "err"
+            | "insert"
+            | "remove"
+            | "push"
+            | "pop"
+            | "with_capacity"
+            | "next"
+            | "len"
+            | "is_empty"
+            | "contains_key"
     )
 }
 
