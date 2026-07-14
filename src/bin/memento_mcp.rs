@@ -171,7 +171,9 @@ struct KgGraphParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct KgNeighborsParams {
-    #[schemars(description = "Seed entity_ids to expand from (e.g. a function or file node id)")]
+    #[schemars(
+        description = "REQUIRED, non-empty. Seed entity_ids to expand from — obtain these FIRST from a kg_centrality or kg_graph call (the `entity_id` field, e.g. \"e_34e06cda19fd9c01\"), never invent them. Omitting this errors with 'missing field seeds'."
+    )]
     seeds: Vec<String>,
     #[schemars(description = "Crate/app slug to scope the query")]
     #[serde(default)]

@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Memento Local Node</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen p-8">
+    <div class="max-w-4xl mx-auto">
+        <h1 class="text-3xl font-bold mb-2">🧠 Memento Local Node</h1>
+        <p class="text-gray-400 mb-8">P2P Sovereign Memory Mesh & Privacy Shield</p>
+        
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <!-- Hardware -->
+            <div class="bg-gray-800 p-6 rounded-lg border border-gray-700">
+                <h2 class="text-xl font-semibold mb-4 text-blue-400">⚙️ Hardware Auto-Scaling</h2>
+                <div class="flex justify-between items-center mb-2">
+                    <span class="text-gray-400">Compute Profile:</span>
+                    <span class="font-mono text-sm px-2 py-1 bg-gray-700 rounded">{{ gpu_status }}</span>
+                </div>
+                <div class="flex justify-between items-center">
+                    <span class="text-gray-400">Strategy:</span>
+                    <span class="font-mono text-sm text-green-400">{{ strategy }}</span>
+                </div>
+                <p class="text-xs text-gray-500 mt-4">Local Memento automatically detects hardware and assigns semantic processing to VRAM if available.</p>
+            </div>
+            
+            <!-- Queue -->
+            <div class="bg-gray-800 p-6 rounded-lg border border-gray-700">
+                <h2 class="text-xl font-semibold mb-4 text-purple-400">🛡️ Privacy Shield Queue</h2>
+                <div class="flex justify-between items-center mb-2">
+                    <span class="text-gray-400">Pending Documents:</span>
+                    <span class="font-mono text-lg font-bold text-yellow-400">{{ queue_count }}</span>
+                </div>
+                <div class="flex justify-between items-center">
+                    <span class="text-gray-400">Sanitization LLM:</span>
+                    <span class="font-mono text-sm px-2 py-1 bg-gray-700 rounded">Qwen-1.5B (Offline)</span>
+                </div>
+                <p class="text-xs text-gray-500 mt-4">Documents wait here for overnight batch sanitization (PII stripping) before sending semantic vectors to the central Hera node.</p>
+            </div>
+        </div>
+        
+        <div class="mt-8 bg-gray-800 p-6 rounded-lg border border-gray-700">
+             <h2 class="text-xl font-semibold mb-4 text-green-400">👀 Configured Local Folders</h2>
+             
+             <!-- Add Folder Form -->
+             <form action="/add-folder" method="POST" class="mb-6 flex gap-3 items-end bg-gray-900 p-4 rounded border border-gray-700">
+                 <div class="flex-1">
+                     <label class="block text-xs text-gray-400 mb-1">Absolute Directory Path</label>
+                     <input type="text" name="path" placeholder="e.g. /home/paulo/Documents" required class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-green-500">
+                 </div>
+                 <div class="flex items-center pb-2">
+                     <input type="checkbox" name="sanitize_pii" id="sanitize_pii" checked class="w-4 h-4 text-green-600 bg-gray-800 border-gray-600 rounded focus:ring-green-500 focus:ring-2">
+                     <label for="sanitize_pii" class="ml-2 text-sm text-gray-300">Sanitize SLM (PII)</label>
+                 </div>
+                 <button type="submit" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded text-sm font-medium transition-colors">Add Folder</button>
+             </form>
+
+             <!-- Folder List -->
+             {% if folders.is_empty() %}
+                <p class="text-gray-500 text-sm italic py-2">No folders configured. Add one above to start the mesh ingestion.</p>
+             {% else %}
+             <ul class="space-y-3">
+                 {% for folder in folders %}
+                 <li class="flex items-center justify-between bg-gray-900 p-3 rounded border border-gray-700">
+                     <div class="flex items-center gap-3">
+                         <span class="text-xl">📁</span>
+                         <code class="text-green-400 font-mono text-sm">{{ folder.path }}</code>
+                         {% if folder.sanitize_pii %}
+                            <span class="text-xs text-purple-400 bg-purple-900/30 px-2 py-0.5 rounded border border-purple-800">PII Shield Active</span>
+                         {% else %}
+                            <span class="text-xs text-gray-400 bg-gray-800 px-2 py-0.5 rounded border border-gray-600">Raw Processing</span>
+                         {% endif %}
+                     </div>
+                     <form action="/remove-folder" method="POST" class="m-0">
+                         <input type="hidden" name="path" value="{{ folder.path }}">
+                         <button type="submit" class="text-red-400 hover:text-red-300 text-sm transition-colors">Remove</button>
+                     </form>
+                 </li>
+                 {% endfor %}
+             </ul>
+             {% endif %}
+        </div>
+        
+        <!-- Document Explorer (Qdrant GUI Placeholder) -->
+        <div class="mt-8 bg-gray-900 p-6 rounded-lg border border-gray-700 shadow-inner">
+             <h2 class="text-xl font-semibold mb-4 text-white">🔎 Local Vector Explorer (Qdrant API)</h2>
+             <div class="flex gap-2 mb-4">
+                 <input type="text" placeholder="Search your local semantic memory..." class="flex-1 bg-gray-800 border border-gray-600 rounded px-4 py-2 text-white focus:outline-none focus:border-blue-500">
+                 <button class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded font-medium transition-colors">Search</button>
+             </div>
+             
+             <div class="space-y-4">
+                 <div class="bg-gray-800 p-4 border border-gray-700 rounded border-l-4 border-l-blue-500">
+                     <div class="flex justify-between items-start">
+                         <h3 class="font-medium text-blue-300">Project_Alpha_Architecture.pdf</h3>
+                         <span class="text-xs text-gray-400 font-mono bg-gray-900 px-2 py-1 rounded">Score: 0.92</span>
+                     </div>
+                     <p class="text-sm text-gray-400 mt-2">...the core engine utilizes a rolling buffer over the SWARM interface to maintain state without...</p>
+                     <div class="mt-3 flex gap-2">
+                         <span class="text-xs text-green-400 bg-gray-900 px-2 py-1 rounded border border-green-900">Sanitized</span>
+                         <span class="text-xs text-purple-400 bg-gray-900 px-2 py-1 rounded border border-purple-900">Local Only</span>
+                     </div>
+                 </div>
+                 
+                 <div class="bg-gray-800 p-4 border border-gray-700 rounded border-l-4 border-l-blue-500">
+                     <div class="flex justify-between items-start">
+                         <h3 class="font-medium text-blue-300">meeting_notes_q3.txt</h3>
+                         <span class="text-xs text-gray-400 font-mono bg-gray-900 px-2 py-1 rounded">Score: 0.81</span>
+                     </div>
+                     <p class="text-sm text-gray-400 mt-2">...decided to pivot the Vetra3 frontend towards the unified Zero-JS standard because...</p>
+                     <div class="mt-3 flex gap-2">
+                         <span class="text-xs text-green-400 bg-gray-900 px-2 py-1 rounded border border-green-900">Sanitized</span>
+                     </div>
+                 </div>
+             </div>
+        </div>
+    </div>
+</body>
+</html>

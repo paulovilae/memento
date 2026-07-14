@@ -1,0 +1,6 @@
+/target
+.env.local
+.env
+patch.diff
+*.orig
+*.rej
