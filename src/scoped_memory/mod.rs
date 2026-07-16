@@ -1,17 +1,22 @@
 // Module declarations
+mod compression;
 mod deletion;
 mod derivation;
 mod embedding;
 mod helpers;
 mod parsing;
+mod recall;
+mod search;
 mod stats;
 
+pub use compression::{compress_project, compress_room, compress_session, derive_memory, memory_promote};
 pub use deletion::delete_records;
+pub use recall::{get_recent_events, get_working_context, recall_recursive_context};
+pub use search::{get_timeline, search_records, semantic_recall};
 pub use stats::app_stats;
 
 // Import internal types and functions
 use derivation::*;
-use embedding::{cosine_similarity, parse_embedding, unpack_embedding};
 use helpers::*;
 use parsing::*;
 
