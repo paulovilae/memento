@@ -517,9 +517,32 @@ pub async fn recall_recursive_context(pool: &sqlx::PgPool, payload: Value) -> Va
         }
     }
 
-    let working_context = get_working_context(pool, payload.clone()).await;
-    let durable_facts = get_durable_facts(pool, payload.clone()).await;
-    let recent_events = get_recent_events(pool, payload.clone()).await;
+    // Optional compaction: skip_working_context eliminates ~40% token duplication
+    // (working_context mirrors top-level durable_facts + recent_events).
+    // max_durable_facts / max_recent_events cap sub-call limits for smaller contexts.
+    let skip_wc = payload
+        .get("skip_working_context")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut durable_payload = payload.clone();
+    if let Some(n) = payload.get("max_durable_facts").and_then(|v| v.as_i64()) {
+        durable_payload["limit"] = n.into();
+    }
+    let mut events_payload = payload.clone();
+    if let Some(n) = payload.get("max_recent_events").and_then(|v| v.as_i64()) {
+        events_payload["limit"] = n.into();
+    }
+    let working_context_data = if skip_wc {
+        Value::Null
+    } else {
+        get_working_context(pool, payload.clone())
+            .await
+            .get("working_context")
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let durable_facts = get_durable_facts(pool, durable_payload).await;
+    let recent_events = get_recent_events(pool, events_payload).await;
 
     if !touched_ids.is_empty() {
         let _ = touch_usage(pool, &touched_ids).await;
@@ -532,7 +555,7 @@ pub async fn recall_recursive_context(pool: &sqlx::PgPool, payload: Value) -> Va
             "project_summaries": project_summaries,
             "room_summaries": room_summaries,
             "session_summaries": session_summaries,
-            "working_context": working_context.get("working_context").cloned().unwrap_or(Value::Null),
+            "working_context": working_context_data,
             "durable_facts": durable_facts.get("entries").cloned().unwrap_or(Value::Array(Vec::new())),
             "recent_events": recent_events.get("entries").cloned().unwrap_or(Value::Array(Vec::new()))
         }
