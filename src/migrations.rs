@@ -710,6 +710,13 @@ pub async fn run_all(pool: &sqlx::PgPool) -> anyhow::Result<()> {
         migration_15_hera_tool_calls(pool),
     )
     .await?;
+    run_migration(
+        pool,
+        16,
+        "memento_mcp_usage",
+        migration_16_memento_mcp_usage(pool),
+    )
+    .await?;
 
     Ok(())
 }
@@ -846,6 +853,55 @@ async fn migration_15_hera_tool_calls(pool: &sqlx::PgPool) -> anyhow::Result<()>
     // Give the durable billing sink the same join key + node dimension.
     ensure_pg_column(pool, "hera_usage_events", "trace_id", "TEXT NOT NULL DEFAULT ''").await?;
     ensure_pg_column(pool, "hera_usage_events", "node", "TEXT NOT NULL DEFAULT ''").await?;
+
+    Ok(())
+}
+
+/// Direct MCP-server usage telemetry — the counterpart to `hera_tool_calls`
+/// for tool calls that reach Memento straight through the `memento-mcp`
+/// stdio bridge (kg_graph, store_memory, recall_recursive_context, ...),
+/// bypassing Hera entirely. Before this, that traffic was invisible: only
+/// calls routed through Hera's own tool loop landed in `hera_tool_calls`.
+async fn migration_16_memento_mcp_usage(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS memento_mcp_usage_events (
+            id          BIGSERIAL PRIMARY KEY,
+            ts          TIMESTAMP DEFAULT now(),
+            session_id  TEXT,
+            tool_name   TEXT,
+            action      TEXT,
+            app_id      TEXT DEFAULT 'memento-mcp',
+            duration_ms INTEGER,
+            success     BOOLEAN,
+            error       TEXT
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    ensure_pg_index(
+        pool,
+        "idx_memento_mcp_usage_tool_ts",
+        "memento_mcp_usage_events",
+        "(tool_name, ts DESC)",
+    )
+    .await?;
+    ensure_pg_index(
+        pool,
+        "idx_memento_mcp_usage_ts",
+        "memento_mcp_usage_events",
+        "(ts DESC)",
+    )
+    .await?;
+    ensure_pg_index(
+        pool,
+        "idx_memento_mcp_usage_session",
+        "memento_mcp_usage_events",
+        "(session_id, ts DESC)",
+    )
+    .await?;
 
     Ok(())
 }

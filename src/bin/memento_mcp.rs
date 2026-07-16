@@ -23,10 +23,47 @@ use rmcp::{
     ServerHandler, ServiceExt,
 };
 use serde::Deserialize;
+use std::sync::OnceLock;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 const MEMENTO_SOCKET: &str = "/tmp/memento.sock";
+
+/// Per-process session identifier for direct-MCP usage telemetry. Stdio MCP
+/// has no native session concept, so we synthesize one once at process
+/// startup (pid + boot-time nanos) and reuse it for every call this process
+/// makes — good enough to group "one Claude Code session's worth of Memento
+/// MCP calls" without pulling in a uuid dependency this crate doesn't have.
+static MCP_SESSION_ID: OnceLock<String> = OnceLock::new();
+
+fn mcp_session_id() -> &'static str {
+    MCP_SESSION_ID.get_or_init(|| {
+        let pid = std::process::id();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("mcp-{pid}-{nanos}")
+    })
+}
+
+/// Classify a `send_ipc_raw` response into (success, error) using the same
+/// transport-level error prefixes `send_ipc_raw` itself returns on failure
+/// (socket connect/write/read failures) — not a JSON-body inspection of
+/// Memento's actual response, which may have its own `{"ok": false, ...}`
+/// shape that callers already handle individually.
+fn classify_transport_result(response: &str) -> (bool, Option<String>) {
+    if response.starts_with("Error writing to Memento socket")
+        || response.starts_with("Error shutting down write")
+        || response.starts_with("Error reading from Memento socket")
+        || response.starts_with("Cannot connect to Memento daemon")
+    {
+        (false, Some(response.to_string()))
+    } else {
+        (true, None)
+    }
+}
 
 fn request_envelope(action: &str, payload: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
@@ -250,7 +287,10 @@ struct KgSemanticSearchParams {
 // ─── IPC Client Helper ──────────────────────────────────────────────────
 
 /// Sends a JSON action to the Memento daemon over UDS and returns the response.
-async fn send_ipc(action: &str, payload: serde_json::Value) -> String {
+/// This is the raw transport call — no telemetry. Used directly (not via
+/// `send_ipc`) for the fire-and-forget usage-log call itself, so logging a
+/// call never recursively logs itself.
+async fn send_ipc_raw(action: &str, payload: serde_json::Value) -> String {
     let msg = request_envelope(action, payload);
 
     match UnixStream::connect(MEMENTO_SOCKET).await {
@@ -276,6 +316,37 @@ async fn send_ipc(action: &str, payload: serde_json::Value) -> String {
             )
         }
     }
+}
+
+/// Sends a JSON action to the Memento daemon over UDS and returns the
+/// response — the single choke point every MCP tool handler in this bridge
+/// goes through. Wraps `send_ipc_raw` with direct-MCP-usage telemetry: times
+/// the call, classifies success/error, and fires a SECOND, non-blocking IPC
+/// call (`mcp_log_usage`) to record it. The usage-log call is spawned on its
+/// own task and its result is discarded — a logging failure (or a slow
+/// Memento) must never delay or break the original tool response.
+async fn send_ipc(action: &str, payload: serde_json::Value) -> String {
+    let started = Instant::now();
+    let response = send_ipc_raw(action, payload).await;
+    let duration_ms = started.elapsed().as_millis() as i64;
+
+    let (success, error) = classify_transport_result(&response);
+    let action = action.to_string();
+    let log_payload = serde_json::json!({
+        "session_id": mcp_session_id(),
+        "tool_name": action,
+        "action": action,
+        "app_id": "memento-mcp",
+        "duration_ms": duration_ms,
+        "success": success,
+        "error": error,
+    });
+
+    tokio::spawn(async move {
+        let _ = send_ipc_raw("mcp_log_usage", log_payload).await;
+    });
+
+    response
 }
 
 // ─── MCP Server Implementation ──────────────────────────────────────────
