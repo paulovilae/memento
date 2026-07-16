@@ -190,6 +190,66 @@ pub async fn hera_log_tool_call(pool: &sqlx::PgPool, payload: &Value) -> Value {
     json!({ "ok": true })
 }
 
+/// INSERT one direct-MCP-usage telemetry row (the `memento-mcp` stdio bridge
+/// choke point in `send_ipc`). Best-effort: SQL errors are logged but never
+/// propagated (mirrors `hera_log_usage` / `hera_log_tool_call`).
+/// payload fields (all optional):
+///   session_id, tool_name, action, app_id, duration_ms, success, error
+pub async fn mcp_log_usage(pool: &sqlx::PgPool, payload: &Value) -> Value {
+    let s = |key: &str| -> String {
+        payload
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let session_id = s("session_id");
+    let tool_name = s("tool_name");
+    let action = s("action");
+    let app_id_raw = s("app_id");
+    let app_id = if app_id_raw.is_empty() {
+        "memento-mcp".to_string()
+    } else {
+        app_id_raw
+    };
+    let duration_ms = payload
+        .get("duration_ms")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0) as i32;
+    let success = payload
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let error: Option<String> = payload
+        .get("error")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let result = sqlx::query(
+        r#"
+        INSERT INTO memento_mcp_usage_events
+            (session_id, tool_name, action, app_id, duration_ms, success, error)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "#,
+    )
+    .bind(&session_id)
+    .bind(&tool_name)
+    .bind(&action)
+    .bind(&app_id)
+    .bind(duration_ms)
+    .bind(success)
+    .bind(&error)
+    .execute(pool)
+    .await;
+
+    if let Err(e) = result {
+        warn!(error = %e, tool_name = %tool_name, "mcp_log_usage: INSERT failed (best-effort, ignored)");
+    }
+
+    json!({ "ok": true })
+}
+
 /// Check today's usage against configured limits for (app_id, user_id?).
 /// Returns `{"ok": true}` when within limits or no limit is configured.
 /// Returns `{"ok": false, "reason": "..."}` when a limit is exceeded.

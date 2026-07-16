@@ -416,6 +416,7 @@ async fn process_uds_stream(
             "hera_tool_calls_recent" => usage_store::hera_tool_calls_recent(&pool, &req.payload).await,
             "hera_trace_timeline" => usage_store::hera_trace_timeline(&pool, &req.payload).await,
             "hera_trace_list" => usage_store::hera_trace_list(&pool, &req.payload).await,
+            "mcp_log_usage" => usage_store::mcp_log_usage(&pool, &req.payload).await,
 
             // ─── Paulo Bio Data Actions ───────────────────────────────
             "query_bio" => bio::query_bio(&pool, req.payload).await,

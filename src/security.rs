@@ -271,6 +271,10 @@ impl SecurityConfig {
             | "hera_log_usage"
             | "hera_log_tool_call"
             | "hera_check_limit"
+            // Direct-MCP usage telemetry (memento-mcp bridge's send_ipc choke
+            // point) — same best-effort/open-to-any-authenticated-caller
+            // semantics as hera_log_usage/hera_log_tool_call above.
+            | "mcp_log_usage"
             | "save_memory" => Ok(()),
             "hera_usage_stats"
             | "hera_tool_calls_recent"
