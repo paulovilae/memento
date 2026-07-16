@@ -93,7 +93,7 @@ impl SecurityConfig {
             ),
             audit_clients: parse_set_env(
                 "MEMENTO_AUDIT_CLIENTS",
-                &["hera", "os-v3", "paulovila-rust", "sentinel"],
+                &["hera", "os-v3", "paulovila-rust", "sentinel", "argus", "imaginclaw"],
             ),
         }
     }
