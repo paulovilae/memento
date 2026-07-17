@@ -469,6 +469,11 @@ pub async fn hera_tool_calls_recent(pool: &sqlx::PgPool, payload: &Value) -> Val
         .get("since_minutes")
         .and_then(|v| v.as_i64())
         .unwrap_or(0) as i32;
+    let session_id = payload
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let limit = payload
         .get("limit")
         .and_then(|v| v.as_i64())
@@ -484,14 +489,16 @@ pub async fn hera_tool_calls_recent(pool: &sqlx::PgPool, payload: &Value) -> Val
           AND ($2 = '' OR app_id = $2)
           AND ($3 = -1 OR success = ($3 = 1))
           AND ($4 = 0 OR ts >= now() - make_interval(mins => $4))
+          AND ($5 = '' OR session_id = $5)
         ORDER BY id DESC
-        LIMIT $5
+        LIMIT $6
         "#,
     )
     .bind(&tool_name)
     .bind(&app_id)
     .bind(succ_filter)
     .bind(since_min)
+    .bind(&session_id)
     .bind(limit)
     .fetch_all(pool)
     .await;
